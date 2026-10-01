@@ -13,7 +13,7 @@ param(
 
     [Parameter()]
     [ValidatePattern('^[A-Fa-f0-9]{40}$')]
-    [string]$Thumbprint = "66F554380EED5866003577C6BB52409662A05CB4",
+    [string]$Thumbprint = "66F554380EED586",
 
     [Parameter()]
     [ValidatePattern('^[0-9a-fA-F-]{36}$')]
@@ -24,7 +24,7 @@ param(
     [string]$TenantId = "26c9169c",
 
     [Parameter()]
-    [string]$DatabasePath = "C:\Users\Rob.MacDonald\OneDrive - NBCC\Documents\Documentation\git\powershell\NBCC-SharePoint.db",
+    [string]$DatabasePath = "SharePoint.db",
 
     [Parameter()]
     [switch]$Refresh,
