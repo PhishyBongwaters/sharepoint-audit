@@ -17,11 +17,11 @@ param(
 
     [Parameter()]
     [ValidatePattern('^[0-9a-fA-F-]{36}$')]
-    [string]$ClientId = "57cb2292-6742-45ab-a332-2917e5952ce5",
+    [string]$ClientId = "57cb229",
 
     [Parameter()]
     [ValidatePattern('^[0-9a-fA-F-]{36}$')]
-    [string]$TenantId = "26c9169c-4645-432c-939d-4918d4f21bdc",
+    [string]$TenantId = "26c9169c",
 
     [Parameter()]
     [string]$DatabasePath = "C:\Users\Rob.MacDonald\OneDrive - NBCC\Documents\Documentation\git\powershell\NBCC-SharePoint.db",
