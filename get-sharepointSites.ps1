@@ -735,6 +735,11 @@ function Save-RoleAssignments {
 
     # The REST call happens before this delete (see callers), so a failed
     # fetch never wipes previously captured grants.
+    if ($null -eq $Assignments.Value) {
+        Write-Warning "Unexpected role-assignment response for object $ObjectDbId; keeping existing permissions."
+        return
+    }
+
     Invoke-SqliteQuery `
         -DataSource $DatabasePath `
         -Query @"
@@ -1092,9 +1097,16 @@ function ScanNextSite {
             -Activity "Scanning Object Permissions" `
             -Completed
 
-        Invoke-FindingsAnalysis `
-            -DatabasePath $DatabasePath `
-            -SiteId $Site.SiteId
+        # Findings are derived data: a failure here must not fail the site
+        # whose permissions were just captured successfully.
+        try {
+            Invoke-FindingsAnalysis `
+                -DatabasePath $DatabasePath `
+                -SiteId $Site.SiteId
+        }
+        catch {
+            Write-Warning "Findings analysis failed for $($Site.SiteUrl): $($_.Exception.Message)"
+        }
 
         Complete-SiteScan `
             -SiteId $Site.SiteId `

@@ -22,7 +22,7 @@
 FROM Permissions pe
 JOIN Objects o ON o.ObjectId = pe.ObjectId
 JOIN Sites s ON s.SiteId = o.SiteId
-JOIN Principals p ON p.PrincipalId = pe.PrincipalId
+JOIN Principals p ON p.Id = pe.PrincipalId
 ORDER BY s.Title, o.ObjectTitle
 LIMIT 500;</textarea><div class="toolbar" style="margin-top:10px"><button class="btn primary" id="runQuery">Run query</button><button class="btn export" data-target="queryResults">Export CSV</button><span class="pill">Ctrl + Enter</span></div><div id="queryMessage"></div><div id="queryResults"></div></div></section>
 <section id="schema" class="view"><div class="panel"><h2>Database schema</h2><div id="schemaTable"></div></div></section>
