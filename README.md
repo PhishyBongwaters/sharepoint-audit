@@ -12,21 +12,43 @@ scans tenant-wide, stores everything in SQLite, and reports offline.
 ## How it works
 
 1. `-Refresh` — site inventory via `Get-PnPTenantSite` into the `Sites` table
-   (personal/OneDrive `-my` sites excluded). Everything starts as `Pending`.
+   (personal/OneDrive `-my` sites excluded). New sites start as `Pending`;
+   existing sites keep their scan status (only the title is refreshed).
 2. `-ScanNext` / `-ScanAll` — per site: root web, site-level role assignments,
    lists/libraries, then role assignments for every object with unique
    (broken) permissions. `ScanStatus` checkpoints progress, so an interrupted
    run resumes instead of restarting (`InProgress` rows reset to `Pending`
-   on startup).
-3. `-Report` — console reports: effective permissions, site permissions,
-   inheritance state, Full Control assignments, direct user grants.
+   on startup). REST calls are throttle-aware (429/503 → honor `Retry-After`,
+   else exponential backoff with jitter); a site that stays throttled is
+   requeued as `Pending` rather than marked `Failed`.
+3. `-Analyze` — (re)generates `SecurityFindings` from the collected data
+   (also runs automatically after each successful site scan).
+4. `-Report` — console reports: direct grants, site permissions,
+   inheritance state, Full Control assignments, direct user grants, and
+   security findings. Read-only: never creates or modifies the database.
 
 ## Schema
 
 `Sites` → `Objects` (Site/Library/List tree via `ParentObjectId`,
 `HasUniquePermissions` flags broken inheritance) → `Permissions` →
-`Principals`. `SecurityFindings` is reserved for the rules engine (not yet
-populated by the scanner).
+`Principals`. Principals are keyed per site collection
+(`UNIQUE (SiteId, SharePointId)`) because SharePoint `Member.Id` is only
+unique within a site collection; `Permissions.PrincipalId` references the
+surrogate `Principals.Id`. `SecurityFindings` holds the findings rules
+output (see below).
+
+### Findings rules (v1)
+
+| FindingType        | Severity | Trigger                                              |
+|--------------------|----------|------------------------------------------------------|
+| `FullControlGrant` | High     | Any Full Control grant                               |
+| `GuestDirectAccess`| High     | B2B guest (`LoginName` contains `#ext#`) with a direct grant |
+| `DirectUserGrant`  | Medium   | Non-guest user with a direct grant (review debt)     |
+| `BrokenInheritance`| Low      | Object with unique permissions (sprawl signal)       |
+| `ExcessOwners`     | High     | More than 3 distinct Full Control principals on one object |
+
+Not yet covered (need more data capture): anonymous/org-wide sharing links,
+stale access (needs Entra sign-in data).
 
 ## Requirements
 
@@ -40,39 +62,42 @@ populated by the scanner).
 
 | Parameter       | Purpose                                              |
 |-----------------|------------------------------------------------------|
-| `-SiteUrl`      | Site to connect to (tenant admin site for `-Refresh`) |
-| `-Thumbprint`   | Certificate thumbprint for app-only auth              |
-| `-ClientId`     | Entra app (client) ID                                 |
-| `-TenantId`     | Tenant ID                                             |
-| `-DatabasePath` | SQLite database file                                  |
+| `-SiteUrl`      | Site to connect to (`-Refresh` works from any site; `Get-PnPTenantSite` elevates to the tenant admin context itself) |
+| `-Thumbprint`   | Certificate thumbprint for app-only auth (required at runtime) |
+| `-ClientId`     | Entra app (client) ID (required at runtime)           |
+| `-TenantId`     | Tenant ID (required at runtime)                       |
+| `-DatabasePath` | SQLite database file (default `.\SharePoint-Audit.db`) |
 | `-Refresh`      | Rebuild the site inventory                            |
 | `-ScanNext`     | Scan the next pending site                             |
 | `-ScanAll`      | Scan all pending sites                                 |
+| `-Analyze`      | (Re)generate security findings for the whole database  |
 | `-Report`       | Print the console reports                              |
 
 **Do not commit real values.** Pass `-Thumbprint`, `-ClientId`, and
 `-TenantId` at runtime or via a local config file — never in the repo.
+The script refuses to connect without them.
 
 ## Viewer
 
 Open `view.html` in a browser and drop the scanner's `.db` file onto it.
-Everything runs locally (sql.js in the browser); the file is never uploaded,
-and the query console only accepts read-only `SELECT`/`WITH`/`EXPLAIN`.
-
-> Setup note: the page currently ships only the sql.js loader stub. Add the
-> engine before the first `<script>` block, e.g.
-> `<script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.8.0/sql-wasm.js"></script>`,
-> or vendor `sql-wasm.wasm` alongside the page.
+Everything runs locally (sql.js in the browser, loaded from CDN); the file
+is never uploaded, and the query console only accepts read-only
+`SELECT`/`WITH`/`EXPLAIN`.
 
 ## Status / roadmap
 
 Done: site inventory, site- and library-level permission capture,
-checkpoint/resume scanning, console reports, viewer shell.
+checkpoint/resume scanning, console reports, viewer, findings rules engine
+(v1), throttle-aware backoff with requeue, per-site principal keying,
+parameterized SQL.
 
-Not yet: the findings rules engine (anonymous links, org-wide links on
-sensitive libraries, broken inheritance + broad-group grants, guest access,
-permission sprawl, stale access, excess owners), item-level crawl,
-throttle-aware backoff, delta/incremental scans, scheduled runs and alerting.
+Not yet: sharing-link capture (anonymous/org-wide links), stale access
+detection, item-level crawl, delta/incremental scans, scheduled runs and
+alerting.
+
+> Schema note: databases created before the per-site principal keying change
+> are rejected at startup with instructions to recreate them — their
+> cross-site identity data cannot be unmerged.
 
 ## Security notes
 

@@ -3,7 +3,24 @@
 #Requires -Modules PSSQLite
 # https://www.powershellgallery.com/packages/PSSQLite/1.1.0
 
+<#
+.SYNOPSIS
+    Scans SharePoint site permissions and inheritance into SQLite, then
+    derives security findings ("oopsies") from the collected data.
 
+.DESCRIPTION
+    -Refresh  rebuilds the site inventory (personal/OneDrive sites excluded).
+    -ScanNext / -ScanAll walk pending sites: root web, site role assignments,
+               lists/libraries, and role assignments for objects with unique
+               (broken) permissions. Progress checkpoints in SQLite; an
+               interrupted run resumes instead of restarting.
+    -Analyze  (re)generates security findings from the collected data.
+    -Report   prints console reports. Read-only: never creates or modifies
+               the database.
+
+    Authentication is Entra app-only via certificate. Pass -Thumbprint,
+    -ClientId and -TenantId at runtime; never commit real values.
+#>
 
 param(
     [Parameter()]
@@ -12,30 +29,104 @@ param(
     [string]$SiteUrl = "https://nbccollege.sharepoint.com/sites/MainSite/",
 
     [Parameter()]
-    [ValidatePattern('^[A-Fa-f0-9]{40}$')]
-    [string]$Thumbprint = "66F554380EED586",
+    [string]$Thumbprint = "",
 
     [Parameter()]
-    [ValidatePattern('^[0-9a-fA-F-]{36}$')]
-    [string]$ClientId = "57cb229",
+    [string]$ClientId = "",
 
     [Parameter()]
-    [ValidatePattern('^[0-9a-fA-F-]{36}$')]
-    [string]$TenantId = "26c9169c",
+    [string]$TenantId = "",
 
     [Parameter()]
-    [string]$DatabasePath = "SharePoint.db",
+    [string]$DatabasePath = ".\SharePoint-Audit.db",
 
     [Parameter()]
     [switch]$Refresh,
     [switch]$ScanNext,
     [switch]$Report,
-    [switch]$ScanAll
+    [switch]$ScanAll,
+    [switch]$Analyze
 )
-###############################################################################################
-###############################################################################################
-#Import-Module PSSQLite
 
+###############################################################################################
+#   Throttle-aware REST wrapper ###############################################################
+###############################################################################################
+
+function Get-ThrottleStatusCode {
+    param($ErrorRecord)
+
+    $ex = $ErrorRecord.Exception
+    while ($ex) {
+        if ($ex -is [System.Net.WebException] -and $null -ne $ex.Response) {
+            try { return [int]$ex.Response.StatusCode } catch { return $null }
+        }
+        $ex = $ex.InnerException
+    }
+    return $null
+}
+
+function Get-RetryAfterSeconds {
+    param($ErrorRecord)
+
+    $ex = $ErrorRecord.Exception
+    while ($ex) {
+        if ($ex -is [System.Net.WebException] -and $null -ne $ex.Response) {
+            $val = $ex.Response.Headers['Retry-After']
+            if ($val -match '^\d+$') { return [int]$val }
+        }
+        $ex = $ex.InnerException
+    }
+    return $null
+}
+
+function Invoke-ResilientRestMethod {
+    <#
+    .SYNOPSIS
+        Invoke-PnPSPRestMethod with 429/503 retry: honors Retry-After,
+        otherwise exponential backoff with jitter (max 5 retries).
+        Throws a THROTTLE_EXHAUSTED-prefixed error when retries run out.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Url,
+        [int]$MaxRetries = 5
+    )
+
+    $attempt = 0
+    while ($true) {
+        try {
+            return Invoke-PnPSPRestMethod -Url $Url
+        }
+        catch {
+            $attempt++
+            $statusCode = Get-ThrottleStatusCode -ErrorRecord $_
+            $message = $_.Exception.Message
+            $throttled = ($statusCode -eq 429 -or $statusCode -eq 503) -or
+                         ($message -match '429|Too Many Requests|throttl')
+
+            if ($throttled -and $attempt -le $MaxRetries) {
+                $retryAfter = Get-RetryAfterSeconds -ErrorRecord $_
+                if ($retryAfter) {
+                    $delay = $retryAfter
+                }
+                else {
+                    $delay = [math]::Pow(2, $attempt) + ((Get-Random -Maximum 1000) / 1000.0)
+                }
+                Write-Warning ("Throttled (HTTP {0}). Waiting {1:N1}s before retry {2} of {3}: {4}" -f
+                    $statusCode, $delay, $attempt, $MaxRetries, $Url)
+                Start-Sleep -Seconds $delay
+                continue
+            }
+            if ($throttled) {
+                throw [System.Exception]::new("THROTTLE_EXHAUSTED: $Url")
+            }
+            throw
+        }
+    }
+}
+
+###############################################################################################
+#   Database ##################################################################################
+###############################################################################################
 
 function Initialize-Database {
     param(
@@ -73,14 +164,18 @@ CREATE TABLE IF NOT EXISTS Objects (
 );
 
 CREATE TABLE IF NOT EXISTS Principals (
-    PrincipalId INTEGER PRIMARY KEY,
-    LoginName TEXT,
+    Id INTEGER PRIMARY KEY AUTOINCREMENT,
+    SiteId INTEGER NOT NULL,
+    SharePointId INTEGER,
+    LoginName TEXT NOT NULL,
     Title TEXT,
     PrincipalTypeId INTEGER,
     PrincipalTypeName TEXT,
     Email TEXT,
     UserPrincipalName TEXT,
-    IsSiteAdmin INTEGER
+    IsSiteAdmin INTEGER,
+    FOREIGN KEY (SiteId) REFERENCES Sites(SiteId),
+    UNIQUE (SiteId, SharePointId)
 );
 
 CREATE TABLE IF NOT EXISTS Permissions (
@@ -90,11 +185,11 @@ CREATE TABLE IF NOT EXISTS Permissions (
     PermissionLevel TEXT NOT NULL,
     GrantedDirectly INTEGER NOT NULL,
     FOREIGN KEY (ObjectId) REFERENCES Objects(ObjectId),
-    FOREIGN KEY (PrincipalId) REFERENCES Principals(PrincipalId),
+    FOREIGN KEY (PrincipalId) REFERENCES Principals(Id),
     UNIQUE (ObjectId, PrincipalId, PermissionLevel)
 );
 
-CREATE TABLE SecurityFindings (
+CREATE TABLE IF NOT EXISTS SecurityFindings (
     FindingId INTEGER PRIMARY KEY AUTOINCREMENT,
     SiteId INTEGER NOT NULL,
     ObjectId INTEGER,
@@ -103,9 +198,9 @@ CREATE TABLE SecurityFindings (
     FindingType TEXT,
     PermissionLevel TEXT,
     Details TEXT,
-    DetectedDate DATETIME
+    DetectedDate DATETIME,
+    FOREIGN KEY (SiteId) REFERENCES Sites(SiteId)
 );
-
 "@
 }
 
@@ -114,7 +209,7 @@ function Test-DatabaseSchema {
         [string]$DatabasePath
     )
 
-    Write-Output "Validating DB Schema for $DatabasePath"  
+    Write-Output "Validating DB Schema for $DatabasePath"
 
     $RequiredTables = @(
         'Sites',
@@ -145,7 +240,29 @@ WHERE type='table';
             "Database schema validation failed. " +
             "Missing tables: " +
             ($MissingTables -join ', ')
-        )        
+        )
+    }
+
+    # v2 schema: Principals must be keyed per site (surrogate Id, SiteId,
+    # SharePointId). Databases built by older versions merged identities
+    # across sites and cannot be unmerged.
+    $PrincipalColumns =
+        Invoke-SqliteQuery `
+            -DataSource $DatabasePath `
+            -Query @"
+PRAGMA table_info(Principals);
+"@ |
+        Select-Object -ExpandProperty name
+
+    foreach ($col in @('Id', 'SiteId', 'SharePointId')) {
+        if ($col -notin @($PrincipalColumns)) {
+            throw (
+                "Database was created by an older version of this script " +
+                "(Principals table lacks '$col'). Identity data from that " +
+                "version is unreliable across sites. Move the database file " +
+                "aside and let the script create a fresh one, then rescan."
+            )
+        }
     }
 
     Write-Host "Database schema validated."
@@ -168,20 +285,23 @@ WHERE ScanStatus = 'InProgress';
 "@
 }
 
+
 #   Get Sharepoint Sites ######################################################################
 ###############################################################################################
 function Update-SiteInventory {
-    
+
     param(
         [string]$DatabasePath
     )
 
     Write-Output "Refreshing Sites"
 
-    $Sites = Get-PnPTenantSite |
-        Where-Object {
-            $_.Url -notlike "*-my.sharepoint.com*"
-        }
+    $Sites = @(
+        Get-PnPTenantSite |
+            Where-Object {
+                $_.Url -notlike "*-my.sharepoint.com*"
+            }
+    )
 
     $Total = $Sites.Count
     $Current = 0
@@ -199,11 +319,11 @@ function Update-SiteInventory {
             $Site.Url
         }
         else {
-            $Site.Title.Replace("'", "''")
+            $Site.Title
         }
 
-        $Url = $Site.Url.Replace("'", "''")
-
+        # On conflict only the title is refreshed: ScanStatus, LastScanned
+        # and ErrorMessage are scan progress and must survive a refresh.
         Invoke-SqliteQuery `
             -DataSource $DatabasePath `
             -Query @"
@@ -213,16 +333,18 @@ INSERT INTO Sites (
     ScanStatus
 )
 VALUES (
-    '$Url',
-    '$Title',
+    @Url,
+    @Title,
     'Pending'
 )
 ON CONFLICT(SiteUrl)
 DO UPDATE SET
-    Title = excluded.Title,
-    ScanStatus = excluded.ScanStatus,
-    ErrorMessage = NULL;
-"@
+    Title = excluded.Title;
+"@ `
+            -SqlParameters @{
+                Url   = $Site.Url
+                Title = $Title
+            }
     }
 
     Write-Progress `
@@ -239,6 +361,10 @@ DO UPDATE SET
 ###############################################################################################
 function ScanAllSites {
 
+    param(
+        [string]$DatabasePath
+    )
+
     while ($true) {
 
         $Site = Get-NextPendingSite `
@@ -248,7 +374,7 @@ function ScanAllSites {
             break
         }
 
-        ScanNextSite
+        ScanNextSite -DatabasePath $DatabasePath
     }
 
     Write-Host "All sites processed."
@@ -288,13 +414,13 @@ function Add-SiteObject {
     )
 
     $Title = if ([string]::IsNullOrEmpty($Web.Title)) {
-        $Site.Title.Replace("'", "''")
+        $Site.Title
     }
     else {
-        $Web.Title.Replace("'", "''")
+        $Web.Title
     }
 
-    $Url   = $Site.SiteUrl.Replace("'", "''")
+    $HasUnique = if ($Web.HasUniqueRoleAssignments) { 1 } else { 0 }
 
     Invoke-SqliteQuery `
         -DataSource $DatabasePath `
@@ -309,13 +435,13 @@ INSERT INTO Objects (
     HasUniquePermissions
 )
 VALUES (
-    $($Site.SiteId),
+    @SiteId,
     NULL,
     'Site',
-    '$($Web.Id)',
-    '$Title',
-    '$Url',
-    $(if ($Web.HasUniqueRoleAssignments) { 1 } else { 0 })
+    @ObjectUniqueId,
+    @Title,
+    @Url,
+    @HasUnique
 )
 ON CONFLICT(SiteId, ObjectUniqueId)
 DO UPDATE SET
@@ -324,13 +450,15 @@ DO UPDATE SET
     ObjectTitle = excluded.ObjectTitle,
     ObjectUrl = excluded.ObjectUrl,
     HasUniquePermissions = excluded.HasUniquePermissions;
-"@
+"@ `
+        -SqlParameters @{
+            SiteId         = $Site.SiteId
+            ObjectUniqueId = $Web.Id.ToString()
+            Title          = $Title
+            Url            = $Site.SiteUrl
+            HasUnique      = $HasUnique
+        }
 }
-
-#    add-SiteObject `
-#        -Site $Site `
-#        -Web $Web `
-#        -DatabasePath $DatabasePath
 ###############################################################################################
 ###############################################################################################
 
@@ -350,8 +478,9 @@ UPDATE Sites
 SET
     ScanStatus = 'InProgress',
     ErrorMessage = NULL
-WHERE SiteId = $SiteId;
-"@
+WHERE SiteId = @SiteId;
+"@ `
+        -SqlParameters @{ SiteId = $SiteId }
 }
 ###############################################################################################
 ###############################################################################################
@@ -372,8 +501,9 @@ UPDATE Sites
 SET
     ScanStatus = 'Complete',
     LastScanned = datetime('now')
-WHERE SiteId = $SiteId;
-"@
+WHERE SiteId = @SiteId;
+"@ `
+        -SqlParameters @{ SiteId = $SiteId }
 }
 ###############################################################################################
 ###############################################################################################
@@ -388,20 +518,23 @@ function Fail-SiteScan {
         [string]$DatabasePath
     )
 
-    $ErrorMessage = $ErrorMessage.Replace("'", "''")
-
     Invoke-SqliteQuery `
         -DataSource $DatabasePath `
         -Query @"
 UPDATE Sites
 SET
     ScanStatus = 'Failed',
-    ErrorMessage = '$ErrorMessage'
-WHERE SiteId = $SiteId;
-"@
+    ErrorMessage = @ErrorMessage
+WHERE SiteId = @SiteId;
+"@ `
+        -SqlParameters @{
+            SiteId       = $SiteId
+            ErrorMessage = $ErrorMessage
+        }
 }
 ###############################################################################################
 ###############################################################################################
+
 
 #   Add Site Libraries ########################################################################
 ###############################################################################################
@@ -413,18 +546,22 @@ function Add-SiteLibraries {
     )
 
     # Get the Site Object we already created
-    $SiteObject = Invoke-SqliteQuery `
+    $SiteObjectId = Invoke-SqliteQuery `
         -DataSource $DatabasePath `
         -Query @"
 SELECT ObjectId
 FROM Objects
-WHERE SiteId = $($Site.SiteId)
+WHERE SiteId = @SiteId
   AND ObjectType = 'Site'
 LIMIT 1;
-"@
+"@ `
+        -SqlParameters @{ SiteId = $Site.SiteId } |
+        Select-Object -ExpandProperty ObjectId
 
-    $Lists = Invoke-PnPSPRestMethod `
-        -Url "/_api/web/lists?`$select=Id,Title,BaseTemplate,Hidden,HasUniqueRoleAssignments"
+    $BaseUri = ([uri]$Site.SiteUrl).GetLeftPart([System.UriPartial]::Authority).TrimEnd('/')
+
+    $Lists = Invoke-ResilientRestMethod `
+        -Url "/_api/web/lists?`$select=Id,Title,BaseTemplate,Hidden,HasUniqueRoleAssignments,RootFolder/ServerRelativeUrl&`$expand=RootFolder"
 
     foreach ($List in $Lists.Value) {
 
@@ -432,12 +569,19 @@ LIMIT 1;
             continue
         }
 
-        $Title = $List.Title.Replace("'", "''")
-
         $ObjectType = switch ($List.BaseTemplate) {
             101 { 'Library' }
             default { 'List' }
         }
+
+        $ObjectUrl = if ($List.RootFolder -and $List.RootFolder.ServerRelativeUrl) {
+            $BaseUri + $List.RootFolder.ServerRelativeUrl
+        }
+        else {
+            ''
+        }
+
+        $HasUnique = if ($List.HasUniqueRoleAssignments) { 1 } else { 0 }
 
         Invoke-SqliteQuery `
             -DataSource $DatabasePath `
@@ -452,13 +596,13 @@ INSERT INTO Objects (
     HasUniquePermissions
 )
 VALUES (
-    $($Site.SiteId),
-    $($SiteObject.ObjectId),
-    '$ObjectType',
-    '$($List.Id)',
-    '$Title',
-    '',
-    $(if ($List.HasUniqueRoleAssignments) { 1 } else { 0 })
+    @SiteId,
+    @ParentId,
+    @ObjectType,
+    @ObjectUniqueId,
+    @Title,
+    @Url,
+    @HasUnique
 )
 ON CONFLICT(SiteId, ObjectUniqueId)
 DO UPDATE SET
@@ -467,54 +611,58 @@ DO UPDATE SET
     ObjectTitle = excluded.ObjectTitle,
     ObjectUrl = excluded.ObjectUrl,
     HasUniquePermissions = excluded.HasUniquePermissions;
-"@
+"@ `
+            -SqlParameters @{
+                SiteId         = $Site.SiteId
+                ParentId       = $SiteObjectId
+                ObjectType     = $ObjectType
+                ObjectUniqueId = $List.Id.ToString()
+                Title          = $List.Title
+                Url            = $ObjectUrl
+                HasUnique      = $HasUnique
+            }
     }
 }
 
 ###############################################################################################
 ###############################################################################################
 
-#   Add Oject Permissions #####################################################################
+#   Upsert principal, return its database Id ###################################################
 ###############################################################################################
-function Add-ObjectPermissions {
+function Get-PrincipalDbId {
+    <#
+    .SYNOPSIS
+        Upserts a principal scoped to its site collection and returns the
+        Principals.Id surrogate key.
+
+    .DESCRIPTION
+        SharePoint Member.Id is unique only within a site collection, so the
+        identity key is (SiteId, SharePointId). Permissions reference the
+        surrogate Id, never the SharePoint id directly.
+    #>
 
     param(
-        $Object,
+        [int]$SiteId,
+        $Member,
         [string]$DatabasePath
     )
 
-    $Assignments = Invoke-PnPSPRestMethod `
-        -Url "/_api/web/lists(guid'$($Object.ObjectUniqueId)')/roleassignments?`$expand=Member,RoleDefinitionBindings"
+    $PrincipalTypeName = switch ($Member.PrincipalType) {
+        1 { 'User' }
+        4 { 'SharePointGroup' }
+        8 { 'SecurityGroup' }
+        15 { 'Claim' }
+        default { 'Unknown' }
+    }
+
+    $IsSiteAdmin = if ($Member.IsSiteAdmin) { 1 } else { 0 }
 
     Invoke-SqliteQuery `
         -DataSource $DatabasePath `
         -Query @"
-    DELETE FROM Permissions
-    WHERE ObjectId = $($Object.ObjectId);
-"@
-
-    foreach ($Assignment in $Assignments.Value) {
-
-        $Member = $Assignment.Member
-
-        $PrincipalTypeName = switch ($Member.PrincipalType) {
-            1 { 'User' }
-            4 { 'SharePointGroup' }
-            8 { 'SecurityGroup' }
-            15 { 'Claim' }
-            default { 'Unknown' }
-        }
-
-        $LoginName = ($Member.LoginName ?? '').Replace("'", "''")
-        $Title     = ($Member.Title ?? '').Replace("'", "''")
-        $Email     = ($Member.Email ?? '').Replace("'", "''")
-        $UPN       = ($Member.UserPrincipalName ?? '').Replace("'", "''")
-
-        Invoke-SqliteQuery `
-            -DataSource $DatabasePath `
-            -Query @"
 INSERT INTO Principals (
-    PrincipalId,
+    SiteId,
+    SharePointId,
     LoginName,
     Title,
     PrincipalTypeId,
@@ -524,16 +672,17 @@ INSERT INTO Principals (
     IsSiteAdmin
 )
 VALUES (
-    $($Member.Id),
-    '$LoginName',
-    '$Title',
-    $($Member.PrincipalType),
-    '$PrincipalTypeName',
-    '$Email',
-    '$UPN',
-    $(if ($Member.IsSiteAdmin) { 1 } else { 0 })
+    @SiteId,
+    @SharePointId,
+    @LoginName,
+    @Title,
+    @PrincipalTypeId,
+    @PrincipalTypeName,
+    @Email,
+    @UPN,
+    @IsSiteAdmin
 )
-ON CONFLICT(PrincipalId)
+ON CONFLICT(SiteId, SharePointId)
 DO UPDATE SET
     LoginName = excluded.LoginName,
     Title = excluded.Title,
@@ -542,15 +691,71 @@ DO UPDATE SET
     Email = excluded.Email,
     UserPrincipalName = excluded.UserPrincipalName,
     IsSiteAdmin = excluded.IsSiteAdmin;
-"@
+"@ `
+        -SqlParameters @{
+            SiteId          = $SiteId
+            SharePointId    = $Member.Id
+            LoginName       = [string]$Member.LoginName
+            Title           = [string]$Member.Title
+            PrincipalTypeId = $Member.PrincipalType
+            PrincipalTypeName = $PrincipalTypeName
+            Email           = [string]$Member.Email
+            UPN             = [string]$Member.UserPrincipalName
+            IsSiteAdmin     = $IsSiteAdmin
+        }
+
+    return Invoke-SqliteQuery `
+        -DataSource $DatabasePath `
+        -Query @"
+SELECT Id
+FROM Principals
+WHERE SiteId = @SiteId
+  AND SharePointId = @SharePointId
+LIMIT 1;
+"@ `
+        -SqlParameters @{
+            SiteId       = $SiteId
+            SharePointId = $Member.Id
+        } |
+        Select-Object -ExpandProperty Id
+}
+###############################################################################################
+###############################################################################################
+
+#   Persist a set of role assignments #########################################################
+###############################################################################################
+function Save-RoleAssignments {
+
+    param(
+        $Assignments,
+        [int]$ObjectDbId,
+        [int]$SiteId,
+        [string]$DatabasePath
+    )
+
+    # The REST call happens before this delete (see callers), so a failed
+    # fetch never wipes previously captured grants.
+    Invoke-SqliteQuery `
+        -DataSource $DatabasePath `
+        -Query @"
+DELETE FROM Permissions
+WHERE ObjectId = @ObjectId;
+"@ `
+        -SqlParameters @{ ObjectId = $ObjectDbId }
+
+    foreach ($Assignment in $Assignments.Value) {
+
+        $Member = $Assignment.Member
+        $PrincipalDbId = Get-PrincipalDbId `
+            -SiteId $SiteId `
+            -Member $Member `
+            -DatabasePath $DatabasePath
 
         foreach ($Role in $Assignment.RoleDefinitionBindings) {
 
             if ($Role.Name -eq 'Limited Access') {
                 continue
             }
-
-            $PermissionLevel = $Role.Name.Replace("'", "''")
 
             Invoke-SqliteQuery `
                 -DataSource $DatabasePath `
@@ -562,23 +767,50 @@ INSERT INTO Permissions (
     GrantedDirectly
 )
 VALUES (
-    $($Object.ObjectId),
-    $($Member.Id),
-    '$PermissionLevel',
+    @ObjectId,
+    @PrincipalId,
+    @PermissionLevel,
     1
 )
 ON CONFLICT(ObjectId, PrincipalId, PermissionLevel)
 DO UPDATE SET
     GrantedDirectly = excluded.GrantedDirectly;
-"@
+"@ `
+                -SqlParameters @{
+                    ObjectId        = $ObjectDbId
+                    PrincipalId     = $PrincipalDbId
+                    PermissionLevel = $Role.Name
+                }
         }
     }
+}
+###############################################################################################
+###############################################################################################
+
+#   Add Object Permissions ####################################################################
+###############################################################################################
+function Add-ObjectPermissions {
+
+    param(
+        $Object,
+        [int]$SiteId,
+        [string]$DatabasePath
+    )
+
+    $Assignments = Invoke-ResilientRestMethod `
+        -Url "/_api/web/lists(guid'$($Object.ObjectUniqueId)')/roleassignments?`$expand=Member,RoleDefinitionBindings"
+
+    Save-RoleAssignments `
+        -Assignments $Assignments `
+        -ObjectDbId $Object.ObjectId `
+        -SiteId $SiteId `
+        -DatabasePath $DatabasePath
 }
 
 ###############################################################################################
 ###############################################################################################
 
-#   Add Get Scannable Objects #################################################################
+#   Get Scannable Objects #####################################################################
 ###############################################################################################
 function Get-ScannableObjects {
 
@@ -587,15 +819,19 @@ function Get-ScannableObjects {
         [int]$SiteId
     )
 
+    # Site-level objects are excluded: their permissions are captured by
+    # Add-SitePermissions, and treating a web GUID as a list GUID 404s.
     Invoke-SqliteQuery `
         -DataSource $DatabasePath `
         -Query @"
 SELECT *
 FROM Objects
-WHERE SiteId = $SiteId
+WHERE SiteId = @SiteId
   AND HasUniquePermissions = 1
+  AND ObjectType <> 'Site'
 ORDER BY ObjectId;
-"@
+"@ `
+        -SqlParameters @{ SiteId = $SiteId }
 }
 
 ###############################################################################################
@@ -610,106 +846,176 @@ function Add-SitePermissions {
         [string]$DatabasePath
     )
 
-    $SiteObject = Invoke-SqliteQuery `
+    $SiteObjectId = Invoke-SqliteQuery `
         -DataSource $DatabasePath `
         -Query @"
 SELECT ObjectId
 FROM Objects
-WHERE SiteId = $($Site.SiteId)
+WHERE SiteId = @SiteId
   AND ObjectType = 'Site'
 LIMIT 1;
-"@
+"@ `
+        -SqlParameters @{ SiteId = $Site.SiteId } |
+        Select-Object -ExpandProperty ObjectId
 
-    $Assignments = Invoke-PnPSPRestMethod `
+    $Assignments = Invoke-ResilientRestMethod `
         -Url "/_api/web/roleassignments?`$expand=Member,RoleDefinitionBindings"
+
+    Save-RoleAssignments `
+        -Assignments $Assignments `
+        -ObjectDbId $SiteObjectId `
+        -SiteId $Site.SiteId `
+        -DatabasePath $DatabasePath
+}
+###############################################################################################
+###############################################################################################
+
+
+#   Findings analysis ("oopsies") ##############################################################
+###############################################################################################
+function Invoke-FindingsAnalysis {
+
+    param(
+        [string]$DatabasePath,
+        [int]$SiteId = 0
+    )
+
+    <#
+    .SYNOPSIS
+        (Re)generates SecurityFindings from the collected permission data.
+
+    .DESCRIPTION
+        Idempotent: findings in scope are deleted first, then re-derived.
+        SiteId = 0 means the whole database; otherwise just that site.
+        v1 rules (all evaluable from the current schema):
+          FullControlGrant  (High)   any Full Control grant
+          GuestDirectAccess (High)   B2B guest (LoginName contains #ext#)
+                                     holding a direct grant
+          DirectUserGrant   (Medium) non-guest user with a direct grant
+                                     (review debt)
+          BrokenInheritance (Low)    object with unique permissions
+                                     (sprawl signal)
+          ExcessOwners      (High)   >3 distinct Full Control principals
+                                     on one object
+        Not yet covered (need more capture): anonymous/org-wide sharing
+        links, stale access (needs Entra sign-in data).
+    #>
+
+    $scope = "(@SiteId = 0 OR s.SiteId = @SiteId)"
+    $params = @{ SiteId = $SiteId }
+
+    if ($SiteId -gt 0) {
+        Write-Output "Analyzing findings for site $SiteId"
+    }
+    else {
+        Write-Output "Analyzing findings for all sites"
+    }
 
     Invoke-SqliteQuery `
         -DataSource $DatabasePath `
         -Query @"
-    DELETE FROM Permissions
-    WHERE ObjectId = $($SiteObject.ObjectId);
-"@
+DELETE FROM SecurityFindings
+WHERE @SiteId = 0 OR SiteId = @SiteId;
+"@ `
+        -SqlParameters $params
 
-    foreach ($Assignment in $Assignments.Value) {
+    # R1: Full Control grants
+    Invoke-SqliteQuery `
+        -DataSource $DatabasePath `
+        -Query @"
+INSERT INTO SecurityFindings (SiteId, ObjectId, PrincipalId, Severity, FindingType, PermissionLevel, Details, DetectedDate)
+SELECT s.SiteId, o.ObjectId, p.Id, 'High', 'FullControlGrant', perms.PermissionLevel,
+       'Principal ''' || p.Title || ''' holds Full Control on ' || o.ObjectType || ' ''' || o.ObjectTitle || ''' (' || s.Title || ')',
+       datetime('now')
+FROM Permissions perms
+JOIN Objects o ON o.ObjectId = perms.ObjectId
+JOIN Principals p ON p.Id = perms.PrincipalId
+JOIN Sites s ON s.SiteId = o.SiteId
+WHERE perms.PermissionLevel = 'Full Control'
+  AND $scope;
+"@ `
+        -SqlParameters $params
 
-        $Member = $Assignment.Member
+    # R2: guest/external direct access
+    Invoke-SqliteQuery `
+        -DataSource $DatabasePath `
+        -Query @"
+INSERT INTO SecurityFindings (SiteId, ObjectId, PrincipalId, Severity, FindingType, PermissionLevel, Details, DetectedDate)
+SELECT s.SiteId, o.ObjectId, p.Id, 'High', 'GuestDirectAccess', perms.PermissionLevel,
+       'Guest principal ''' || p.Title || ''' holds ' || perms.PermissionLevel || ' on ' || o.ObjectType || ' ''' || o.ObjectTitle || ''' (' || s.Title || ')',
+       datetime('now')
+FROM Permissions perms
+JOIN Objects o ON o.ObjectId = perms.ObjectId
+JOIN Principals p ON p.Id = perms.PrincipalId
+JOIN Sites s ON s.SiteId = o.SiteId
+WHERE p.LoginName LIKE '%#ext#%'
+  AND perms.GrantedDirectly = 1
+  AND $scope;
+"@ `
+        -SqlParameters $params
 
-        $PrincipalTypeName = switch ($Member.PrincipalType) {
-            1  { 'User' }
-            4  { 'SharePointGroup' }
-            8  { 'SecurityGroup' }
-            15 { 'Claim' }
-            default { 'Unknown' }
-        }
+    # R3: direct user grants (review debt)
+    Invoke-SqliteQuery `
+        -DataSource $DatabasePath `
+        -Query @"
+INSERT INTO SecurityFindings (SiteId, ObjectId, PrincipalId, Severity, FindingType, PermissionLevel, Details, DetectedDate)
+SELECT s.SiteId, o.ObjectId, p.Id, 'Medium', 'DirectUserGrant', perms.PermissionLevel,
+       'User ''' || p.Title || ''' holds a direct ' || perms.PermissionLevel || ' grant on ' || o.ObjectType || ' ''' || o.ObjectTitle || ''' (' || s.Title || ')',
+       datetime('now')
+FROM Permissions perms
+JOIN Objects o ON o.ObjectId = perms.ObjectId
+JOIN Principals p ON p.Id = perms.PrincipalId
+JOIN Sites s ON s.SiteId = o.SiteId
+WHERE p.PrincipalTypeName = 'User'
+  AND p.LoginName NOT LIKE '%#ext#%'
+  AND perms.GrantedDirectly = 1
+  AND $scope;
+"@ `
+        -SqlParameters $params
 
-        $LoginName = ($Member.LoginName ?? '').Replace("'", "''")
-        $Title     = ($Member.Title ?? '').Replace("'", "''")
-        $Email     = ($Member.Email ?? '').Replace("'", "''")
-        $UPN       = ($Member.UserPrincipalName ?? '').Replace("'", "''")
+    # R4: broken inheritance sprawl
+    Invoke-SqliteQuery `
+        -DataSource $DatabasePath `
+        -Query @"
+INSERT INTO SecurityFindings (SiteId, ObjectId, Severity, FindingType, Details, DetectedDate)
+SELECT s.SiteId, o.ObjectId, 'Low', 'BrokenInheritance',
+       o.ObjectType || ' ''' || o.ObjectTitle || ''' has unique permissions (inheritance broken)',
+       datetime('now')
+FROM Objects o
+JOIN Sites s ON s.SiteId = o.SiteId
+WHERE o.HasUniquePermissions = 1
+  AND $scope;
+"@ `
+        -SqlParameters $params
 
-        Invoke-SqliteQuery `
-            -DataSource $DatabasePath `
-            -Query @"
-INSERT INTO Principals (
-    PrincipalId,
-    LoginName,
-    Title,
-    PrincipalTypeId,
-    PrincipalTypeName,
-    Email,
-    UserPrincipalName,
-    IsSiteAdmin
-)
-VALUES (
-    $($Member.Id),
-    '$LoginName',
-    '$Title',
-    $($Member.PrincipalType),
-    '$PrincipalTypeName',
-    '$Email',
-    '$UPN',
-    $(if ($Member.IsSiteAdmin) { 1 } else { 0 })
-)
-ON CONFLICT(PrincipalId)
-DO UPDATE SET
-    LoginName = excluded.LoginName,
-    Title = excluded.Title,
-    PrincipalTypeId = excluded.PrincipalTypeId,
-    PrincipalTypeName = excluded.PrincipalTypeName,
-    Email = excluded.Email,
-    UserPrincipalName = excluded.UserPrincipalName,
-    IsSiteAdmin = excluded.IsSiteAdmin;
-"@
+    # R5: excess owners
+    Invoke-SqliteQuery `
+        -DataSource $DatabasePath `
+        -Query @"
+INSERT INTO SecurityFindings (SiteId, ObjectId, Severity, FindingType, Details, DetectedDate)
+SELECT s.SiteId, o.ObjectId, 'High', 'ExcessOwners',
+       CAST(COUNT(DISTINCT p.Id) AS TEXT) || ' distinct principals hold Full Control on ' || o.ObjectType || ' ''' || o.ObjectTitle || ''' (' || s.Title || ')',
+       datetime('now')
+FROM Permissions perms
+JOIN Objects o ON o.ObjectId = perms.ObjectId
+JOIN Principals p ON p.Id = perms.PrincipalId
+JOIN Sites s ON s.SiteId = o.SiteId
+WHERE perms.PermissionLevel = 'Full Control'
+  AND $scope
+GROUP BY s.SiteId, o.ObjectId
+HAVING COUNT(DISTINCT p.Id) > 3;
+"@ `
+        -SqlParameters $params
 
-        foreach ($Role in $Assignment.RoleDefinitionBindings) {
+    $count = Invoke-SqliteQuery `
+        -DataSource $DatabasePath `
+        -Query @"
+SELECT COUNT(*) AS C FROM SecurityFindings WHERE @SiteId = 0 OR SiteId = @SiteId;
+"@ `
+        -SqlParameters $params |
+        Select-Object -ExpandProperty C
 
-            if ($Role.Name -eq 'Limited Access') {
-                continue
-            }
-
-            $PermissionLevel = $Role.Name.Replace("'", "''")
-
-            Invoke-SqliteQuery `
-                -DataSource $DatabasePath `
-                -Query @"
-INSERT INTO Permissions (
-    ObjectId,
-    PrincipalId,
-    PermissionLevel,
-    GrantedDirectly
-)
-VALUES (
-    $($SiteObject.ObjectId),
-    $($Member.Id),
-    '$PermissionLevel',
-    1
-)
-ON CONFLICT(ObjectId, PrincipalId, PermissionLevel)
-DO UPDATE SET
-    GrantedDirectly = excluded.GrantedDirectly;
-"@
-        }
-    }
+    Write-Host "Findings in scope: $count"
 }
 ###############################################################################################
 ###############################################################################################
@@ -717,6 +1023,11 @@ DO UPDATE SET
 #   Scan next site ############################################################################
 ###############################################################################################
 function ScanNextSite {
+
+    param(
+        [string]$DatabasePath
+    )
+
     $Site = Get-NextPendingSite -DatabasePath $DatabasePath
 
     if (-not $Site) {
@@ -725,7 +1036,7 @@ function ScanNextSite {
     }
 
     Write-Host "Processing $($Site.SiteUrl)"
-    
+
     try {
         Connect-SharePointSite -SiteUrl $Site.SiteUrl
 
@@ -733,7 +1044,7 @@ function ScanNextSite {
             -SiteId $Site.SiteId `
             -DatabasePath $DatabasePath
 
-        $Web = Invoke-PnPSPRestMethod -Url "/_api/web"
+        $Web = Invoke-ResilientRestMethod -Url "/_api/web"
 
         # Create root Site object
         Add-SiteObject `
@@ -751,10 +1062,13 @@ function ScanNextSite {
             -Site $Site `
             -DatabasePath $DatabasePath
 
-        # Get all objects with unique permissions
-        $Objects = Get-ScannableObjects `
-            -DatabasePath $DatabasePath `
-            -SiteId $Site.SiteId
+        # Get all scannable objects (unique permissions, excluding the Site
+        # object itself — its permissions were captured above)
+        $Objects = @(
+            Get-ScannableObjects `
+                -DatabasePath $DatabasePath `
+                -SiteId $Site.SiteId
+        )
 
         $Total = $Objects.Count
         $Current = 0
@@ -770,12 +1084,17 @@ function ScanNextSite {
 
             Add-ObjectPermissions `
                 -Object $Object `
+                -SiteId $Site.SiteId `
                 -DatabasePath $DatabasePath
         }
 
         Write-Progress `
             -Activity "Scanning Object Permissions" `
             -Completed
+
+        Invoke-FindingsAnalysis `
+            -DatabasePath $DatabasePath `
+            -SiteId $Site.SiteId
 
         Complete-SiteScan `
             -SiteId $Site.SiteId `
@@ -785,13 +1104,29 @@ function ScanNextSite {
     }
     catch {
 
-        Fail-SiteScan `
-            -SiteId $Site.SiteId `
-            -ErrorMessage $_.Exception.Message `
-            -DatabasePath $DatabasePath
+        if ($_.Exception.Message -match '^THROTTLE_EXHAUSTED') {
+            # Throttling is transient: requeue instead of failing so the
+            # next run retries the site.
+            Invoke-SqliteQuery `
+                -DataSource $DatabasePath `
+                -Query @"
+UPDATE Sites
+SET ScanStatus = 'Pending',
+    ErrorMessage = 'Throttled; requeued'
+WHERE SiteId = @SiteId;
+"@ `
+                -SqlParameters @{ SiteId = $Site.SiteId }
+            Write-Warning "Throttled while scanning $($Site.SiteUrl); site requeued as Pending."
+        }
+        else {
+            Fail-SiteScan `
+                -SiteId $Site.SiteId `
+                -ErrorMessage $_.Exception.Message `
+                -DatabasePath $DatabasePath
 
-        Write-Host "FAILED: $($Site.SiteUrl)"
-        Write-Host $_.Exception.Message
+            Write-Host "FAILED: $($Site.SiteUrl)"
+            Write-Host $_.Exception.Message
+        }
     }
 }
 ###############################################################################################
@@ -807,7 +1142,7 @@ function Show-PermissionReports {
 
     Write-Host ""
     Write-Host "========================================="
-    Write-Host "Effective Permissions"
+    Write-Host "Direct Grants (unique-permission objects)"
     Write-Host "========================================="
 
     Invoke-SqliteQuery `
@@ -828,7 +1163,7 @@ FROM Permissions perms
 JOIN Objects o
     ON perms.ObjectId = o.ObjectId
 JOIN Principals p
-    ON perms.PrincipalId = p.PrincipalId
+    ON p.Id = perms.PrincipalId
 JOIN Sites s
     ON o.SiteId = s.SiteId
 ORDER BY
@@ -855,7 +1190,7 @@ FROM Permissions perms
 JOIN Objects o
     ON perms.ObjectId = o.ObjectId
 JOIN Principals p
-    ON perms.PrincipalId = p.PrincipalId
+    ON p.Id = perms.PrincipalId
 JOIN Sites s
     ON o.SiteId = s.SiteId
 WHERE o.ObjectType = 'Site'
@@ -910,7 +1245,7 @@ FROM Permissions perms
 JOIN Objects o
     ON perms.ObjectId = o.ObjectId
 JOIN Principals p
-    ON perms.PrincipalId = p.PrincipalId
+    ON p.Id = perms.PrincipalId
 JOIN Sites s
     ON o.SiteId = s.SiteId
 WHERE perms.PermissionLevel = 'Full Control'
@@ -941,7 +1276,7 @@ FROM Permissions perms
 JOIN Objects o
     ON perms.ObjectId = o.ObjectId
 JOIN Principals p
-    ON perms.PrincipalId = p.PrincipalId
+    ON p.Id = perms.PrincipalId
 JOIN Sites s
     ON o.SiteId = s.SiteId
 WHERE p.PrincipalTypeName = 'User'
@@ -950,9 +1285,43 @@ ORDER BY
     o.ObjectTitle,
     p.Title;
 "@ | Format-Table
+
+    Write-Host ""
+    Write-Host "========================================="
+    Write-Host "Security Findings"
+    Write-Host "========================================="
+
+    Invoke-SqliteQuery `
+        -DataSource $DatabasePath `
+        -Query @"
+SELECT
+    s.Title AS SiteName,
+    sf.Severity,
+    sf.FindingType,
+    o.ObjectTitle,
+    p.Title AS Principal,
+    sf.PermissionLevel,
+    sf.Details,
+    sf.DetectedDate
+FROM SecurityFindings sf
+JOIN Sites s
+    ON s.SiteId = sf.SiteId
+LEFT JOIN Objects o
+    ON o.ObjectId = sf.ObjectId
+LEFT JOIN Principals p
+    ON p.Id = sf.PrincipalId
+ORDER BY
+    CASE sf.Severity
+        WHEN 'Critical' THEN 0
+        WHEN 'High' THEN 1
+        WHEN 'Medium' THEN 2
+        WHEN 'Low' THEN 3
+        ELSE 4
+    END,
+    sf.DetectedDate DESC;
+"@ | Format-Table
 }
 
-#Show-PermissionReports -DatabasePath $DatabasePath
 ###############################################################################################
 ###############################################################################################
 
@@ -964,42 +1333,68 @@ function Connect-SharePointSite {
         [string]$SiteUrl
     )
 
-    try {
-        Write-Host "Connecting to SharePoint: $SiteUrl"
-
-        Connect-PnPOnline `
-            -Url $SiteUrl `
-            -ClientId $ClientId `
-            -Tenant $TenantId `
-            -Thumbprint $Thumbprint `
-            -ErrorAction Stop
-
-        Write-Host "Connected."
+    if ([string]::IsNullOrWhiteSpace($Thumbprint) -or
+        [string]::IsNullOrWhiteSpace($ClientId) -or
+        [string]::IsNullOrWhiteSpace($TenantId)) {
+        throw "Missing authentication parameters. Pass -Thumbprint, -ClientId and -TenantId at runtime (never commit real values to the repo)."
     }
-    catch {
-        throw "Failed to connect to SharePoint site '$SiteUrl'. $($_.Exception.Message)"
+
+    $attempt = 0
+    while ($true) {
+        try {
+            Write-Host "Connecting to SharePoint: $SiteUrl"
+
+            Connect-PnPOnline `
+                -Url $SiteUrl `
+                -ClientId $ClientId `
+                -Tenant $TenantId `
+                -Thumbprint $Thumbprint `
+                -ErrorAction Stop
+
+            Write-Host "Connected."
+            return
+        }
+        catch {
+            $attempt++
+            if ($attempt -ge 3) {
+                throw "Failed to connect to SharePoint site '$SiteUrl'. $($_.Exception.Message)"
+            }
+            $delay = [math]::Pow(2, $attempt)
+            Write-Warning "Connect failed (attempt $attempt of 3). Retrying in ${delay}s: $($_.Exception.Message)"
+            Start-Sleep -Seconds $delay
+        }
     }
 }
 
 ###############################################################################################
 ###############################################################################################
 
-Initialize-Database -DatabasePath $DatabasePath
-Test-DatabaseSchema -DatabasePath $DatabasePath
-Reset-IncompleteScans -DatabasePath $DatabasePath
-
-#   Switch ####################################################################################
+#   Main ######################################################################################
 ###############################################################################################
+
+$WriteAction = $Refresh -or $ScanNext -or $ScanAll -or $Analyze
+
+if ($WriteAction) {
+    Initialize-Database -DatabasePath $DatabasePath
+    Test-DatabaseSchema -DatabasePath $DatabasePath
+    Reset-IncompleteScans -DatabasePath $DatabasePath
+}
+
 if ($Refresh) {
     Connect-SharePointSite -SiteUrl $SiteUrl
     Update-SiteInventory -DatabasePath $DatabasePath
 }
 
 if ($ScanNext) {
-    ScanNextSite
+    ScanNextSite -DatabasePath $DatabasePath
 }
 
 if ($Report) {
+    # -Report is read-only: never create or modify the database.
+    if (-not (Test-Path $DatabasePath)) {
+        throw "Database file not found: $DatabasePath. Run with -Refresh first."
+    }
+    Test-DatabaseSchema -DatabasePath $DatabasePath
     Show-PermissionReports -DatabasePath $DatabasePath
 }
 
@@ -1007,14 +1402,21 @@ if ($ScanAll) {
     ScanAllSites -DatabasePath $DatabasePath
 }
 
-if (-not ($Refresh -or $ScanNext -or $Report)) {
+if ($Analyze) {
+    Invoke-FindingsAnalysis -DatabasePath $DatabasePath
+}
+
+if (-not ($Refresh -or $ScanNext -or $Report -or $ScanAll -or $Analyze)) {
     Write-Host "No action specified."
     Write-Host "Available actions:"
     Write-Host "  -Refresh"
     Write-Host "  -ScanNext"
+    Write-Host "  -ScanAll"
+    Write-Host "  -Analyze"
     Write-Host "  -Report"
     return
 }
+
 ###############################################################################################
 ###############################################################################################
 try {
