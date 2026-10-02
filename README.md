@@ -84,6 +84,7 @@ stale access (needs Entra sign-in data).
 | `-ClientId`     | Entra app (client) ID (required at runtime)           |
 | `-TenantId`     | Tenant ID (required at runtime)                       |
 | `-DatabasePath` | SQLite database file (default `.\SharePoint-Audit.db`) |
+| `-ConfigPath`   | YAML config file (default `./audit-config.yaml`) |
 | `-Refresh`      | Rebuild the site inventory                            |
 | `-ScanNext`     | Scan the next pending site                             |
 | `-ScanAll`      | Scan all pending sites                                 |
@@ -92,8 +93,12 @@ stale access (needs Entra sign-in data).
 | `-Report`       | Print the console reports                              |
 
 **Do not commit real values.** Pass `-Thumbprint`, `-ClientId`, and
-`-TenantId` at runtime or via a local config file — never in the repo.
+`-TenantId` at runtime or via `audit-config.yaml` — never in the repo.
 The script refuses to connect without them.
+
+Copy `audit-config.yaml.example` to `audit-config.yaml` and fill in your
+values (flat `key: value` lines; the file is gitignored). Explicit parameters
+override file values. `-ConfigPath` points at a different file.
 
 ## Usage
 

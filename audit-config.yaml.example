@@ -1,0 +1,7 @@
+# Copy to audit-config.yaml and fill in your values.
+# audit-config.yaml is gitignored -- never commit real credentials.
+# Explicit parameters override these values.
+thumbprint: "YOUR_CERT_THUMBPRINT"
+clientid: "YOUR_APP_CLIENT_ID"
+tenantid: "YOUR_TENANT_ID"
+databasepath: "./SharePoint-Audit.db"

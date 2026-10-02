@@ -41,6 +41,9 @@ param(
     [string]$DatabasePath = ".\SharePoint-Audit.db",
 
     [Parameter()]
+    [string]$ConfigPath = "./audit-config.yaml",
+
+    [Parameter()]
     [switch]$Refresh,
     [switch]$ScanNext,
     [switch]$Report,
@@ -50,6 +53,33 @@ param(
     [Parameter()]
     [int]$ScanN = 0
 )
+
+###############################################################################################
+#   Optional YAML config ######################################################################
+###############################################################################################
+# Flat "key: value" config file (gitignored). Values fill in for parameters
+# not passed explicitly; explicit parameters always win.
+$__Config = @{}
+if (Test-Path $ConfigPath) {
+    Get-Content $ConfigPath | ForEach-Object {
+        if ($_ -match '^\s*([^:#\s][^:]*?)\s*:\s*(.+?)\s*$') {
+            $__Config[$matches[1].Trim().ToLower()] = $matches[2].Trim().Trim('"').Trim("'")
+        }
+    }
+}
+$__ParamMap = @{
+    'thumbprint'    = 'Thumbprint'
+    'clientid'      = 'ClientId'
+    'tenantid'      = 'TenantId'
+    'databasepath'  = 'DatabasePath'
+    'database_path' = 'DatabasePath'
+}
+foreach ($__entry in $__ParamMap.GetEnumerator()) {
+    if ($__Config.ContainsKey($__entry.Key) -and -not $PSBoundParameters.ContainsKey($__entry.Value)) {
+        Set-Variable -Name $__entry.Value -Value $__Config[$__entry.Key] -Scope Script
+    }
+}
+Remove-Variable -Name __Config, __ParamMap, __entry -ErrorAction SilentlyContinue
 
 ###############################################################################################
 #   Throttle-aware REST wrapper ###############################################################
