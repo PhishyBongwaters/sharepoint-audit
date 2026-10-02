@@ -413,6 +413,12 @@ function ScanAllSites {
         [string]$DatabasePath
     )
 
+    $Total = [int](Invoke-SqliteQuery `
+        -DataSource $DatabasePath `
+        -Query "SELECT COUNT(*) AS C FROM Sites WHERE ScanStatus = 'Pending'" |
+        Select-Object -ExpandProperty C)
+
+    $done = 0
     while ($true) {
 
         $Site = Get-NextPendingSite `
@@ -422,9 +428,16 @@ function ScanAllSites {
             break
         }
 
+        $done++
+        Write-Progress `
+            -Activity "Scanning Sites" `
+            -Status "Site $done of $Total : $($Site.SiteUrl)" `
+            -PercentComplete (($done / $Total) * 100)
+
         ScanNextSite -DatabasePath $DatabasePath
     }
 
+    Write-Progress -Activity "Scanning Sites" -Completed
     Write-Host "All sites processed."
 }
 ###############################################################################################
@@ -452,10 +465,14 @@ function ScanNextNSites {
         }
 
         $done++
-        Write-Host "--- Site $done of $Count ---"
+        Write-Progress `
+            -Activity "Scanning Sites" `
+            -Status "Site $done of $Count : $($next.SiteUrl)" `
+            -PercentComplete (($done / $Count) * 100)
         ScanNextSite -DatabasePath $DatabasePath
     }
 
+    Write-Progress -Activity "Scanning Sites" -Completed
     Write-Host "Scanned $done site(s)."
 }
 ###############################################################################################
