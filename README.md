@@ -86,6 +86,29 @@ stale access (needs Entra sign-in data).
 `-TenantId` at runtime or via a local config file — never in the repo.
 The script refuses to connect without them.
 
+## Usage
+
+```powershell
+# 1. Build the site inventory (requires auth)
+.\get-sharepointSites.ps1 -Refresh -Thumbprint $thumb -ClientId $id -TenantId $tenant
+
+# 2. Scan in bounded batches; safe to re-run, resumes where it left off (requires auth)
+.\get-sharepointSites.ps1 -ScanN 50 -Thumbprint $thumb -ClientId $id -TenantId $tenant
+
+# Or scan everything pending in one go (requires auth)
+.\get-sharepointSites.ps1 -ScanAll -Thumbprint $thumb -ClientId $id -TenantId $tenant
+
+# 3. Console reports (read-only, no auth needed)
+.\get-sharepointSites.ps1 -Report
+
+# 4. Rebuild all findings from the collected data (no auth needed)
+.\get-sharepointSites.ps1 -Analyze
+```
+
+All commands default to `.\SharePoint-Audit.db`; override with `-DatabasePath`.
+Switches can be combined (e.g. `-Refresh -ScanAll` refreshes the inventory,
+then scans everything pending).
+
 ## Viewer
 
 Open `view.html` in a browser and drop the scanner's `.db` file onto it.
