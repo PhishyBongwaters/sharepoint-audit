@@ -1268,7 +1268,6 @@ function ScanNextSite {
         return
     }
 
-    Write-Host "Processing $($Site.SiteUrl)"
 
     try {
         Connect-SharePointSite -SiteUrl $Site.SiteUrl
@@ -1346,7 +1345,6 @@ function ScanNextSite {
             -SiteId $Site.SiteId `
             -DatabasePath $DatabasePath
 
-        Write-Host "Completed $($Site.SiteUrl)"
     }
     catch {
 
