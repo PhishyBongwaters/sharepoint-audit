@@ -1059,7 +1059,8 @@ function Invoke-FindingsAnalysis {
 
     param(
         [string]$DatabasePath,
-        [int]$SiteId = 0
+        [int]$SiteId = 0,
+        [switch]$Quiet
     )
 
     <#
@@ -1248,7 +1249,7 @@ SELECT COUNT(*) AS C FROM SecurityFindings WHERE @SiteId = 0 OR SiteId = @SiteId
         -SqlParameters $params |
         Select-Object -ExpandProperty C
 
-    Write-Host "Findings in scope: $count"
+    if (-not $Quiet) { Write-Host "Findings in scope: $count" }
 }
 ###############################################################################################
 ###############################################################################################
@@ -1335,7 +1336,8 @@ function ScanNextSite {
         try {
             Invoke-FindingsAnalysis `
                 -DatabasePath $DatabasePath `
-                -SiteId $Site.SiteId
+                -SiteId $Site.SiteId `
+                -Quiet
         }
         catch {
             Write-Warning "Findings analysis failed for $($Site.SiteUrl): $($_.Exception.Message)"
