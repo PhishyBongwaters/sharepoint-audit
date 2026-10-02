@@ -8,6 +8,32 @@ auto-elevates to the `<tenant>-admin` context, so `-Refresh` works as written.
 Each item: problem → fix → acceptance. The review loop repeats until every
 acceptance holds and a fresh full read surfaces nothing new.
 
+## Verification map
+
+How each fix was verified (2026-10-02). Levels: **Executed** = ran for real
+(sqlite3 harness on the script's actual SQL, or pwsh + real PSSQLite 1.1.0);
+**Parsed** = clean pass with the real PowerShell 7.6.6 parser; **Inspected** =
+careful code review; **Live-only** = needs a tenant run to confirm.
+
+| ID | Fix | Verification |
+|----|-----|--------------|
+| F1 | Site excluded from permission loop | Executed |
+| F3 | Per-site principal keying | Executed (sqlite3 + real PSSQLite) |
+| F4 | Throttle retry / requeue | Inspected; throttle shapes are Live-only |
+| F5 | Refresh preserves scan status | Executed |
+| F6 | Findings engine (5 rules) | Executed (rules fire, idempotent, scoped) |
+| F7 | `@()` collection wrapping | Inspected + Parsed |
+| F8 | Viewer CDN engine + join fixes | CDN URLs return HTTP 200; joins grepped |
+| F9 | `-ScanAll`/`-Analyze` in no-action guard | Inspected + Parsed |
+| F10 | Report renamed to "Direct Grants" | Inspected |
+| F11 | Library URLs via RootFolder expand | Inspected; REST shape is Live-only |
+| F12 | Parameterized SQL | Executed (real PSSQLite 1.1.0) |
+| F13 | Init only on write actions | Inspected + Parsed |
+| F14 | Explicit `-DatabasePath` | Inspected + Parsed |
+| F15 | Clear auth-missing error | Inspected + Parsed |
+| F16 | `IF NOT EXISTS` on all tables | Executed |
+| — | Whole script syntax | Parsed clean (PS 7.6.6) |
+
 ## F1 — Site objects poison the permission loop (blocker)
 
 **Problem:** `Get-ScannableObjects` returns every object with
