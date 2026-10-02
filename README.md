@@ -14,7 +14,7 @@ scans tenant-wide, stores everything in SQLite, and reports offline.
 1. `-Refresh` — site inventory via `Get-PnPTenantSite` into the `Sites` table
    (personal/OneDrive `-my` sites excluded). New sites start as `Pending`;
    existing sites keep their scan status (only the title is refreshed).
-2. `-ScanNext` / `-ScanAll` — per site: root web, site-level role assignments,
+2. `-ScanNext` / `-ScanAll` / `-ScanN <number>` — per site: root web, site-level role assignments,
    lists/libraries, then role assignments for every object with unique
    (broken) permissions. `ScanStatus` checkpoints progress, so an interrupted
    run resumes instead of restarting (`InProgress` rows reset to `Pending`
@@ -78,6 +78,7 @@ stale access (needs Entra sign-in data).
 | `-Refresh`      | Rebuild the site inventory                            |
 | `-ScanNext`     | Scan the next pending site                             |
 | `-ScanAll`      | Scan all pending sites                                 |
+| `-ScanN`        | Scan the next N pending sites (e.g. `-ScanN 25`)        |
 | `-Analyze`      | (Re)generate security findings for the whole database  |
 | `-Report`       | Print the console reports                              |
 

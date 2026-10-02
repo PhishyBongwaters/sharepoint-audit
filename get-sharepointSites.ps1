@@ -45,7 +45,10 @@ param(
     [switch]$ScanNext,
     [switch]$Report,
     [switch]$ScanAll,
-    [switch]$Analyze
+    [switch]$Analyze,
+
+    [Parameter()]
+    [int]$ScanN = 0
 )
 
 ###############################################################################################
@@ -390,6 +393,37 @@ function ScanAllSites {
     }
 
     Write-Host "All sites processed."
+}
+###############################################################################################
+###############################################################################################
+
+#   Scan next N sites #########################################################################
+###############################################################################################
+function ScanNextNSites {
+
+    param(
+        [string]$DatabasePath,
+        [int]$Count
+    )
+
+    if ($Count -lt 1) {
+        throw "-ScanN must be a positive number of sites."
+    }
+
+    $done = 0
+    while ($done -lt $Count) {
+
+        $next = Get-NextPendingSite -DatabasePath $DatabasePath
+        if (-not $next) {
+            break
+        }
+
+        $done++
+        Write-Host "--- Site $done of $Count ---"
+        ScanNextSite -DatabasePath $DatabasePath
+    }
+
+    Write-Host "Scanned $done site(s)."
 }
 ###############################################################################################
 ###############################################################################################
@@ -1525,7 +1559,7 @@ function Connect-SharePointSite {
 #   Main ######################################################################################
 ###############################################################################################
 
-$WriteAction = $Refresh -or $ScanNext -or $ScanAll -or $Analyze
+$WriteAction = $Refresh -or $ScanNext -or $ScanAll -or $Analyze -or ($ScanN -gt 0)
 
 if ($WriteAction) {
     Initialize-Database -DatabasePath $DatabasePath
@@ -1555,16 +1589,21 @@ if ($ScanAll) {
     ScanAllSites -DatabasePath $DatabasePath
 }
 
+if ($ScanN -gt 0) {
+    ScanNextNSites -DatabasePath $DatabasePath -Count $ScanN
+}
+
 if ($Analyze) {
     Invoke-FindingsAnalysis -DatabasePath $DatabasePath
 }
 
-if (-not ($Refresh -or $ScanNext -or $Report -or $ScanAll -or $Analyze)) {
+if (-not ($Refresh -or $ScanNext -or $Report -or $ScanAll -or $Analyze -or ($ScanN -gt 0))) {
     Write-Host "No action specified."
     Write-Host "Available actions:"
     Write-Host "  -Refresh"
     Write-Host "  -ScanNext"
     Write-Host "  -ScanAll"
+    Write-Host "  -ScanN <number>   (scan the next N pending sites)"
     Write-Host "  -Analyze"
     Write-Host "  -Report"
     return
