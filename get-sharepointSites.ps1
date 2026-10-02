@@ -10,16 +10,18 @@
 
 .DESCRIPTION
     -Refresh  rebuilds the site inventory (personal/OneDrive sites excluded).
-    -ScanNext / -ScanAll walk pending sites: root web, site role assignments,
-               lists/libraries, and role assignments for objects with unique
-               (broken) permissions. Progress checkpoints in SQLite; an
-               interrupted run resumes instead of restarting.
+    -ScanNext / -ScanN / -ScanAll walk pending sites: root web, site role
+               assignments, lists/libraries, role assignments for objects
+               with unique (broken) permissions, and the sharing-link
+               inventory. Progress checkpoints in SQLite; an interrupted
+               run resumes instead of restarting.
     -Analyze  (re)generates security findings from the collected data.
     -Report   prints console reports. Read-only: never creates or modifies
                the database.
 
     Authentication is Entra app-only via certificate. Pass -Thumbprint,
-    -ClientId and -TenantId at runtime; never commit real values.
+    -ClientId and -TenantId at runtime, or put them in audit-config.yaml
+    (see audit-config.yaml.example); never commit real values.
 #>
 
 param(
