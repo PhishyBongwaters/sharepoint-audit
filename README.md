@@ -35,7 +35,8 @@ scans tenant-wide, stores everything in SQLite, and reports offline.
 (`UNIQUE (SiteId, SharePointId)`) because SharePoint `Member.Id` is only
 unique within a site collection; `Permissions.PrincipalId` references the
 surrogate `Principals.Id`. `SecurityFindings` holds the findings rules
-output (see below).
+output (see below). `SharingLinks` holds the per-site sharing-link
+inventory (backing-group title, file GUID, type hint).
 
 ### Findings rules (v1)
 
@@ -91,20 +92,13 @@ Everything runs locally (sql.js in the browser, loaded from CDN); the file
 is never uploaded, and the query console only accepts read-only
 `SELECT`/`WITH`/`EXPLAIN`.
 
-## Status / roadmap
+## Planned
 
-Done: site inventory, site- and library-level permission capture,
-checkpoint/resume scanning, console reports, viewer, findings rules engine
-(v1), throttle-aware backoff with requeue, per-site principal keying,
-parameterized SQL.
-
-Not yet: sharing-link capture (anonymous/org-wide links), stale access
-detection, item-level crawl, delta/incremental scans, scheduled runs and
-alerting.
-
-> Schema note: databases created before the per-site principal keying change
-> are rejected at startup with instructions to recreate them — their
-> cross-site identity data cannot be unmerged.
+- Authoritative per-link scope and expiry (`GetSharingInformation`) for
+  link-bearing files found by the backing-group inventory
+- Stale access detection (needs Entra sign-in data)
+- Item-level crawl, scoped to broken-inheritance subtrees and sampling
+- Delta/incremental scans, scheduled runs, alerting
 
 ## Security notes
 
