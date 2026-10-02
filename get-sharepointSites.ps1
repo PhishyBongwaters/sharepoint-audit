@@ -18,6 +18,8 @@
     -Analyze  (re)generates security findings from the collected data.
     -Report   prints console reports. Read-only: never creates or modifies
                the database.
+    -ConfigPath YAML config file for auth values (default audit-config.yaml
+               next to the script); explicit parameters override it.
 
     Authentication is Entra app-only via certificate. Pass -Thumbprint,
     -ClientId and -TenantId at runtime, or put them in audit-config.yaml
