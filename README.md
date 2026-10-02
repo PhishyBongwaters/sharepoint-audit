@@ -38,17 +38,26 @@ surrogate `Principals.Id`. `SecurityFindings` holds the findings rules
 output (see below). `SharingLinks` holds the per-site sharing-link
 inventory (backing-group title, file GUID, type hint).
 
-### Findings rules (v1)
+### Severity ratings
 
-| FindingType        | Severity | Trigger                                              |
-|--------------------|----------|------------------------------------------------------|
-| `FullControlGrant` | High     | Any Full Control grant                               |
-| `GuestDirectAccess`| High     | B2B guest (`LoginName` contains `#ext#`) with a direct grant |
-| `DirectUserGrant`  | Medium   | Non-guest user with a direct grant (review debt)     |
-| `BrokenInheritance`| Low      | Object with unique permissions (sprawl signal)       |
-| `ExcessOwners`     | High     | More than 3 distinct Full Control principals on one object |
-| `OrgWideExposure`  | High/Medium | "Everyone except external users" (or "Everyone") with a direct grant — how org-wide links surface in role assignments; High for Full Control/Contribute/Edit |
-| `SharingLinkDetected` | Critical/High/Medium | Sharing-link backing group found (`SharingLinks.*`); severity from type hint (Anonymous → Critical); hint is not authoritative — verify scope |
+Findings are rated Critical → High → Medium → Low. A site/object takes the
+rating of its highest-severity finding; reports sort by severity.
+
+| Severity | Why a site/object gets this rating | Rule |
+|----------|------------------------------------|------|
+| Critical | Anonymous sharing link detected (anyone with the link can access) | `SharingLinkDetected` |
+| High | Any Full Control grant | `FullControlGrant` |
+| High | B2B guest (`LoginName` contains `#ext#`) holds a direct grant | `GuestDirectAccess` |
+| High | More than 3 distinct principals hold Full Control on one object | `ExcessOwners` |
+| High | "Everyone except external users" (or "Everyone") holds Full Control, Contribute, or Edit | `OrgWideExposure` |
+| High | Organization-scoped sharing link detected | `SharingLinkDetected` |
+| Medium | Non-guest user holds a direct grant (review debt) | `DirectUserGrant` |
+| Medium | "Everyone except external users" holds a read/view-only grant | `OrgWideExposure` |
+| Medium | Sharing link detected with unknown/other type hint | `SharingLinkDetected` |
+| Low | Object has unique permissions (broken inheritance -- sprawl signal) | `BrokenInheritance` |
+
+Sharing-link severities come from the backing-group type hint, which is not
+authoritative -- verify scope in SharePoint.
 
 Sharing-link inventory: each scan enumerates the hidden backing groups
 SharePoint creates per link (`SharingLinks.<fileGuid>.<type>.<linkId>`, one
