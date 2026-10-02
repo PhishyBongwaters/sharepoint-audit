@@ -147,7 +147,6 @@ CREATE TABLE IF NOT EXISTS Sites (
     Title TEXT,
     LastScanned DATETIME,
     ScanStatus TEXT,
-    InheritanceEnabled INTEGER,
     SiteType TEXT,
     ErrorMessage TEXT
 );
