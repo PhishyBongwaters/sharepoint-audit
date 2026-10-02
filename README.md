@@ -103,19 +103,22 @@ override file values. `-ConfigPath` points at a different file.
 ## Usage
 
 ```powershell
-# 1. Build the site inventory (requires auth)
-.\get-sharepointSites.ps1 -Refresh -Thumbprint $thumb -ClientId $id -TenantId $tenant
+# With audit-config.yaml in place, auth comes from the file (explicit
+# -Thumbprint/-ClientId/-TenantId still work and override it).
 
-# 2. Scan in bounded batches; safe to re-run, resumes where it left off (requires auth)
-.\get-sharepointSites.ps1 -ScanN 50 -Thumbprint $thumb -ClientId $id -TenantId $tenant
+# 1. Build the site inventory
+.\get-sharepointSites.ps1 -Refresh
 
-# Or scan everything pending in one go (requires auth)
-.\get-sharepointSites.ps1 -ScanAll -Thumbprint $thumb -ClientId $id -TenantId $tenant
+# 2. Scan in bounded batches; safe to re-run, resumes where it left off
+.\get-sharepointSites.ps1 -ScanN 50
 
-# 3. Console reports (read-only, no auth needed)
+# Or scan everything pending in one go
+.\get-sharepointSites.ps1 -ScanAll
+
+# 3. Console reports (read-only)
 .\get-sharepointSites.ps1 -Report
 
-# 4. Rebuild all findings from the collected data (no auth needed)
+# 4. Rebuild all findings from the collected data
 .\get-sharepointSites.ps1 -Analyze
 ```
 
