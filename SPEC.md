@@ -21,7 +21,7 @@ careful code review; **Live-only** = needs a tenant run to confirm.
 | F3 | Per-site principal keying | Executed (sqlite3 + real PSSQLite) |
 | F4 | Throttle retry / requeue | Inspected; throttle shapes are Live-only |
 | F5 | Refresh preserves scan status | Executed |
-| F6 | Findings engine (5 rules) | Executed (rules fire, idempotent, scoped) |
+| F6 | Findings engine (7 rules) | Executed (rules fire, idempotent, scoped) |
 | F7 | `@()` collection wrapping | Inspected + Parsed |
 | F8 | Viewer CDN engine + join fixes | CDN URLs return HTTP 200; joins grepped |
 | F9 | `-ScanAll`/`-Analyze` in no-action guard | Inspected + Parsed |
@@ -124,12 +124,22 @@ v1 rules, all evaluable from the current schema:
 - `BrokenInheritance` (Low): every object with `HasUniquePermissions = 1`
   (sprawl signal).
 - `ExcessOwners` (High): >3 distinct `Full Control` principals on one object.
+- `OrgWideExposure` (High/Medium): "Everyone except external users" (or
+  "Everyone") claim holding a direct grant — organization-wide sharing links
+  surface as this claim in role assignments. High for Full
+  Control/Contribute/Edit, Medium otherwise.
+- `SharingLinkDetected` (Critical/High/Medium): sharing-link backing group
+  (`SharingLinks.<fileGuid>.<type>.<linkId>`) found via the per-site
+  `sitegroups` inventory. Severity from the type hint
+  (Anonymous → Critical, Organization → High, other → Medium); the hint is
+  not authoritative — verify scope in SharePoint.
 - `DetectedDate = datetime('now')`; `FindingType` values are the stable
   strings above; severities use the viewer's `Critical/High/Medium/Low/Info`
   set.
 
-Out of scope (data not yet captured — phase 2): anonymous/org-wide sharing
-links (needs sharing-link capture), stale access (needs Entra sign-in data).
+Out of scope (data not yet captured — phase 2, see F17): authoritative
+per-link details (which need `GetSharingInformation` /
+`Get-PnPFileSharingLink` per file), stale access (needs Entra sign-in data).
 
 **Acceptance:** after `-Analyze`, each rule fires on crafted sample data and
 stays silent when the condition is absent; re-running produces no duplicates.
@@ -241,6 +251,23 @@ would throw "table already exists".
 **Fix:** `IF NOT EXISTS` on all five tables.
 
 **Acceptance:** repeated initialization is a no-op.
+
+## F17 — Authoritative per-link details (next increment)
+
+**Problem:** R7 detects sharing links via backing-group type hints, but the
+hint is not authoritative. True scope/access/expiry per link needs
+`GetSharingInformation` (SharePoint REST, per file/folder — the pnp
+script-samples `spo-audit-sharing-links` pattern) or
+`Get-PnPFileSharingLink` (needs file-identity resolution from the group
+name's file GUID).
+
+**Scope decision needed:** per-library `GetSharingInformation` on root
+folders (bounded: one call per library, misses file-level links) vs. full
+per-file enumeration (authoritative, expensive — item-level crawl). The
+backing-group inventory (R7) already tells you *where* links exist, so a
+targeted follow-up only on link-bearing files is the efficient middle path.
+
+**Acceptance:** TBD once scoped.
 
 ## Also updated in this round
 

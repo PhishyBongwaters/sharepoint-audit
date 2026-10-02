@@ -201,6 +201,17 @@ CREATE TABLE IF NOT EXISTS SecurityFindings (
     DetectedDate DATETIME,
     FOREIGN KEY (SiteId) REFERENCES Sites(SiteId)
 );
+
+CREATE TABLE IF NOT EXISTS SharingLinks (
+    SharingLinkId INTEGER PRIMARY KEY AUTOINCREMENT,
+    SiteId INTEGER NOT NULL,
+    GroupTitle TEXT NOT NULL,
+    FileGuid TEXT,
+    TypeHint TEXT,
+    DetectedDate DATETIME,
+    FOREIGN KEY (SiteId) REFERENCES Sites(SiteId),
+    UNIQUE (SiteId, GroupTitle)
+);
 "@
 }
 
@@ -216,7 +227,8 @@ function Test-DatabaseSchema {
         'Objects',
         'Principals',
         'Permissions',
-        'SecurityFindings'
+        'SecurityFindings',
+        'SharingLinks'
     )
 
     $ExistingTables =
@@ -875,6 +887,78 @@ LIMIT 1;
 ###############################################################################################
 ###############################################################################################
 
+#   Sharing-link inventory ####################################################################
+###############################################################################################
+function Add-SharingLinkInventory {
+
+    param(
+        $Site,
+        [string]$DatabasePath
+    )
+
+    <#
+    .SYNOPSIS
+        Records sharing links via the hidden backing groups SharePoint creates
+        for them (SharingLinks.<fileGuid>.<type>.<linkId>).
+
+    .DESCRIPTION
+        Enumerating every file's links would require an item-level crawl. The
+        backing groups give a cheap per-site inventory instead: one call that
+        scales with how much is actually shared, not with library size. The
+        <type> segment is a hint, not authoritative — findings tell the
+        analyst to verify scope. Authoritative per-link details
+        (GetSharingInformation / Get-PnPFileSharingLink) are a separate,
+        more expensive step.
+    #>
+
+    $Groups = Invoke-ResilientRestMethod `
+        -Url "/_api/web/sitegroups?`$select=Id,Title&`$filter=startswith(Title,'SharingLinks.')"
+
+    if ($null -eq $Groups.Value) {
+        return
+    }
+
+    foreach ($Group in $Groups.Value) {
+
+        # SharingLinks.<fileGuid>.<type>.<linkId>
+        $parts = $Group.Title.Split('.')
+        $FileGuid = if ($parts.Count -gt 1) { $parts[1] } else { '' }
+        $TypeHint = if ($parts.Count -gt 2) { $parts[2] } else { '' }
+
+        Invoke-SqliteQuery `
+            -DataSource $DatabasePath `
+            -Query @"
+INSERT INTO SharingLinks (
+    SiteId,
+    GroupTitle,
+    FileGuid,
+    TypeHint,
+    DetectedDate
+)
+VALUES (
+    @SiteId,
+    @GroupTitle,
+    @FileGuid,
+    @TypeHint,
+    datetime('now')
+)
+ON CONFLICT(SiteId, GroupTitle)
+DO UPDATE SET
+    FileGuid = excluded.FileGuid,
+    TypeHint = excluded.TypeHint,
+    DetectedDate = excluded.DetectedDate;
+"@ `
+            -SqlParameters @{
+                SiteId     = $Site.SiteId
+                GroupTitle = $Group.Title
+                FileGuid   = $FileGuid
+                TypeHint   = $TypeHint
+            }
+    }
+}
+###############################################################################################
+###############################################################################################
+
 
 #   Findings analysis ("oopsies") ##############################################################
 ###############################################################################################
@@ -902,8 +986,20 @@ function Invoke-FindingsAnalysis {
                                      (sprawl signal)
           ExcessOwners      (High)   >3 distinct Full Control principals
                                      on one object
-        Not yet covered (need more capture): anonymous/org-wide sharing
-        links, stale access (needs Entra sign-in data).
+          OrgWideExposure   (High/Medium) "Everyone except external users"
+                                     (or "Everyone") holding a direct grant —
+                                     org-wide links surface as this claim in
+                                     role assignments. High for
+                                     Full Control/Contribute/Edit, Medium
+                                     otherwise.
+          SharingLinkDetected (Critical/High/Medium) sharing-link backing
+                                     group (SharingLinks.*) found on the site.
+                                     Severity from the type hint (Anonymous /
+                                     Organization / other); the hint is not
+                                     authoritative — verify scope.
+        Not yet covered (need more capture): authoritative per-link details
+        (GetSharingInformation / Get-PnPFileSharingLink), stale access
+        (needs Entra sign-in data).
     #>
 
     $scope = "(@SiteId = 0 OR s.SiteId = @SiteId)"
@@ -1012,6 +1108,45 @@ HAVING COUNT(DISTINCT p.Id) > 3;
 "@ `
         -SqlParameters $params
 
+    # R6: organization-wide exposure via the "Everyone except external users"
+    # claim (org-wide sharing links surface as this grant in role assignments)
+    Invoke-SqliteQuery `
+        -DataSource $DatabasePath `
+        -Query @"
+INSERT INTO SecurityFindings (SiteId, ObjectId, PrincipalId, Severity, FindingType, PermissionLevel, Details, DetectedDate)
+SELECT s.SiteId, o.ObjectId, p.Id,
+       CASE WHEN perms.PermissionLevel IN ('Full Control','Contribute','Edit') THEN 'High' ELSE 'Medium' END,
+       'OrgWideExposure', perms.PermissionLevel,
+       'Organization-wide exposure: ''' || p.Title || ''' holds ' || perms.PermissionLevel || ' on ' || o.ObjectType || ' ''' || o.ObjectTitle || ''' (' || s.Title || ')',
+       datetime('now')
+FROM Permissions perms
+JOIN Objects o ON o.ObjectId = perms.ObjectId
+JOIN Principals p ON p.Id = perms.PrincipalId
+JOIN Sites s ON s.SiteId = o.SiteId
+WHERE (p.LoginName LIKE '%spo-grid-all-users%' OR p.Title IN ('Everyone except external users','Everyone'))
+  AND perms.GrantedDirectly = 1
+  AND $scope;
+"@ `
+        -SqlParameters $params
+
+    # R7: sharing links detected via their backing groups. The type hint is
+    # not authoritative — the analyst verifies scope in SharePoint.
+    Invoke-SqliteQuery `
+        -DataSource $DatabasePath `
+        -Query @"
+INSERT INTO SecurityFindings (SiteId, Severity, FindingType, Details, DetectedDate)
+SELECT SiteId,
+       CASE WHEN TypeHint LIKE '%Anonymous%' THEN 'Critical'
+            WHEN TypeHint LIKE '%Organization%' THEN 'High'
+            ELSE 'Medium' END,
+       'SharingLinkDetected',
+       'Sharing link backing group ''' || GroupTitle || ''' (type hint: ' || COALESCE(NULLIF(TypeHint,''), 'unknown') || ', file ' || COALESCE(NULLIF(FileGuid,''), 'unknown') || ') — verify link scope',
+       datetime('now')
+FROM SharingLinks
+WHERE @SiteId = 0 OR SiteId = @SiteId;
+"@ `
+        -SqlParameters $params
+
     $count = Invoke-SqliteQuery `
         -DataSource $DatabasePath `
         -Query @"
@@ -1059,6 +1194,12 @@ function ScanNextSite {
 
         # Capture Site-level permissions
         Add-SitePermissions `
+            -Site $Site `
+            -DatabasePath $DatabasePath
+
+        # Inventory sharing links via their backing groups (cheap: one call
+        # per site, scales with sharing activity not library size)
+        Add-SharingLinkInventory `
             -Site $Site `
             -DatabasePath $DatabasePath
 

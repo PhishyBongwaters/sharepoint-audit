@@ -46,8 +46,15 @@ output (see below).
 | `DirectUserGrant`  | Medium   | Non-guest user with a direct grant (review debt)     |
 | `BrokenInheritance`| Low      | Object with unique permissions (sprawl signal)       |
 | `ExcessOwners`     | High     | More than 3 distinct Full Control principals on one object |
+| `OrgWideExposure`  | High/Medium | "Everyone except external users" (or "Everyone") with a direct grant — how org-wide links surface in role assignments; High for Full Control/Contribute/Edit |
+| `SharingLinkDetected` | Critical/High/Medium | Sharing-link backing group found (`SharingLinks.*`); severity from type hint (Anonymous → Critical); hint is not authoritative — verify scope |
 
-Not yet covered (need more data capture): anonymous/org-wide sharing links,
+Sharing-link inventory: each scan enumerates the hidden backing groups
+SharePoint creates per link (`SharingLinks.<fileGuid>.<type>.<linkId>`, one
+`sitegroups` call per site) into the `SharingLinks` table. Authoritative
+per-link scope/access/expiry (`GetSharingInformation`) is a future increment.
+
+Not yet covered (need more data capture): authoritative per-link details,
 stale access (needs Entra sign-in data).
 
 ## Requirements
