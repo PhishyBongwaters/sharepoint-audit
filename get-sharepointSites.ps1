@@ -1100,7 +1100,7 @@ function Invoke-FindingsAnalysis {
     $params = @{ SiteId = $SiteId }
 
     if ($SiteId -gt 0) {
-        Write-Output "Analyzing findings for site $SiteId"
+        if (-not $Quiet) { Write-Output "Analyzing findings for site $SiteId" }
     }
     else {
         Write-Output "Analyzing findings for all sites"
@@ -1588,7 +1588,7 @@ function Connect-SharePointSite {
     $attempt = 0
     while ($true) {
         try {
-            Write-Host "Connecting to SharePoint: $SiteUrl"
+            Write-Verbose "Connecting to SharePoint: $SiteUrl"
 
             Connect-PnPOnline `
                 -Url $SiteUrl `
@@ -1597,7 +1597,7 @@ function Connect-SharePointSite {
                 -Thumbprint $Thumbprint `
                 -ErrorAction Stop
 
-            Write-Host "Connected."
+            Write-Verbose "Connected."
             return
         }
         catch {
