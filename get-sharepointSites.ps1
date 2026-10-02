@@ -41,7 +41,7 @@ param(
     [string]$DatabasePath = ".\SharePoint-Audit.db",
 
     [Parameter()]
-    [string]$ConfigPath = "./audit-config.yaml",
+    [string]$ConfigPath = (Join-Path $PSScriptRoot "audit-config.yaml"),
 
     [Parameter()]
     [switch]$Refresh,
