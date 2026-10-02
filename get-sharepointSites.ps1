@@ -432,14 +432,14 @@ function ScanAllSites {
 
         $done++
         Write-Progress `
-            -Activity "Scanning Sites" `
+            -Id 0 -Activity "Scanning Sites" `
             -Status "Site $done of $Total : $($Site.SiteUrl)" `
             -PercentComplete (($done / $Total) * 100)
 
         ScanNextSite -DatabasePath $DatabasePath
     }
 
-    Write-Progress -Activity "Scanning Sites" -Completed
+    Write-Progress -Id 0 -Activity "Scanning Sites" -Completed
     Write-Host "All sites processed."
 }
 ###############################################################################################
@@ -468,13 +468,13 @@ function ScanNextNSites {
 
         $done++
         Write-Progress `
-            -Activity "Scanning Sites" `
+            -Id 0 -Activity "Scanning Sites" `
             -Status "Site $done of $Count : $($next.SiteUrl)" `
             -PercentComplete (($done / $Count) * 100)
         ScanNextSite -DatabasePath $DatabasePath
     }
 
-    Write-Progress -Activity "Scanning Sites" -Completed
+    Write-Progress -Id 0 -Activity "Scanning Sites" -Completed
     Write-Host "Scanned $done site(s)."
 }
 ###############################################################################################
@@ -1317,7 +1317,7 @@ function ScanNextSite {
             $Current++
 
             Write-Progress `
-                -Activity "Scanning Object Permissions" `
+                -Id 1 -ParentId 0 -Activity "Scanning Object Permissions" `
                 -Status "$Current of $Total : $($Object.ObjectTitle)" `
                 -PercentComplete (($Current / $Total) * 100)
 
@@ -1328,7 +1328,7 @@ function ScanNextSite {
         }
 
         Write-Progress `
-            -Activity "Scanning Object Permissions" `
+            -Id 1 -Activity "Scanning Object Permissions" `
             -Completed
 
         # Findings are derived data: a failure here must not fail the site
