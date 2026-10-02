@@ -70,7 +70,9 @@ if (Test-Path $ConfigPath) {
 $__ParamMap = @{
     'thumbprint'    = 'Thumbprint'
     'clientid'      = 'ClientId'
+    'client_id'     = 'ClientId'
     'tenantid'      = 'TenantId'
+    'tenant_id'     = 'TenantId'
     'databasepath'  = 'DatabasePath'
     'database_path' = 'DatabasePath'
 }
