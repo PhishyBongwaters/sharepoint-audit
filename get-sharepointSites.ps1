@@ -345,20 +345,24 @@ function Update-SiteInventory {
 INSERT INTO Sites (
     SiteUrl,
     Title,
+    SiteType,
     ScanStatus
 )
 VALUES (
     @Url,
     @Title,
+    @SiteType,
     'Pending'
 )
 ON CONFLICT(SiteUrl)
 DO UPDATE SET
-    Title = excluded.Title;
+    Title = excluded.Title,
+    SiteType = excluded.SiteType;
 "@ `
             -SqlParameters @{
-                Url   = $Site.Url
-                Title = $Title
+                Url      = $Site.Url
+                Title    = $Title
+                SiteType = $Site.Template
             }
     }
 
@@ -802,6 +806,12 @@ WHERE ObjectId = @ObjectId;
             -Member $Member `
             -DatabasePath $DatabasePath
 
+        # Direct = user (1) or claim (15, e.g. "Everyone except external
+        # users" -- the claim itself is the assignment target). Group
+        # grants (4 = SharePoint group, 8 = security group) flow through
+        # membership and are not direct.
+        $GrantedDirectly = if ($Member.PrincipalType -in @(4, 8)) { 0 } else { 1 }
+
         foreach ($Role in $Assignment.RoleDefinitionBindings) {
 
             if ($Role.Name -eq 'Limited Access') {
@@ -821,7 +831,7 @@ VALUES (
     @ObjectId,
     @PrincipalId,
     @PermissionLevel,
-    1
+    @GrantedDirectly
 )
 ON CONFLICT(ObjectId, PrincipalId, PermissionLevel)
 DO UPDATE SET
@@ -831,6 +841,7 @@ DO UPDATE SET
                     ObjectId        = $ObjectDbId
                     PrincipalId     = $PrincipalDbId
                     PermissionLevel = $Role.Name
+                    GrantedDirectly = $GrantedDirectly
                 }
         }
     }
