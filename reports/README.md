@@ -26,6 +26,20 @@ results in an interactive filterable grid instead of a console table.
 to `databasepath` from `audit-config.yaml` (the same config file the main
 scripts use) when present.
 
+Two more tricks:
+
+```powershell
+# Scope a prepacked report to one site (fills in its commented-out
+# SiteUrl filter -- no need to edit the .sql file)
+.\reports\Invoke-Report.ps1 -Name 11-site-findings-detail `
+    -SiteUrl "https://tenant.sharepoint.com/sites/Flagged"
+
+# Export to CSV
+.\reports\Invoke-Report.ps1 -Name 11-site-findings-detail `
+    -SiteUrl "https://tenant.sharepoint.com/sites/Flagged" `
+    -Csv .\findings.csv
+```
+
 ## Scoping to one site
 
 Most reports run tenant-wide. Each has a commented-out filter near the

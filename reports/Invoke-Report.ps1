@@ -16,6 +16,14 @@
         .\Invoke-Report.ps1 -Name guest-access
         .\Invoke-Report.ps1 -Query "SELECT COUNT(*) AS Sites FROM Sites;"
 
+    -SiteUrl scopes a report to one site by filling in the commented-out
+    SiteUrl filter the prepacked reports carry. -Csv writes the results
+    to a CSV file instead of the console.
+
+        .\Invoke-Report.ps1 -Name 11-site-findings-detail `
+            -SiteUrl "https://tenant.sharepoint.com/sites/Flagged" `
+            -Csv .\findings.csv
+
     Reads databasepath from audit-config.yaml (same file as the main
     scripts) when -DatabasePath isn't passed explicitly.
 
@@ -28,6 +36,12 @@ param(
 
     [Parameter()]
     [string]$Query = "",
+
+    [Parameter()]
+    [string]$SiteUrl = "",
+
+    [Parameter()]
+    [string]$Csv = "",
 
     [Parameter()]
     [string]$DatabasePath = (Join-Path (Split-Path $PSScriptRoot -Parent) "SharePoint-Audit.db"),
@@ -89,9 +103,21 @@ if ([string]::IsNullOrWhiteSpace($Query)) {
     $Query = Get-Content $reportFile.FullName -Raw
 }
 
+if (-not [string]::IsNullOrWhiteSpace($SiteUrl)) {
+    # Fill in the commented-out SiteUrl filter the prepacked reports carry.
+    $safeUrl = $SiteUrl.Replace("'", "''")
+    $placeholder = 'https://tenant.sharepoint.com/sites/YourSite'
+    $Query = $Query.Replace("-- AND s.SiteUrl = '$placeholder'", "AND s.SiteUrl = '$safeUrl'")
+    $Query = $Query.Replace("-- WHERE s.SiteUrl = '$placeholder'", "WHERE s.SiteUrl = '$safeUrl'")
+}
+
 $result = Invoke-SqliteQuery -DataSource $DatabasePath -Query $Query
 
-if ($GridView) {
+if (-not [string]::IsNullOrWhiteSpace($Csv)) {
+    $result | Export-Csv -Path $Csv -NoTypeInformation -Encoding UTF8
+    Write-Host "Wrote $(@($result).Count) rows to $Csv"
+}
+elseif ($GridView) {
     $result | Out-GridView -Title "SharePoint Audit Report"
 }
 else {
