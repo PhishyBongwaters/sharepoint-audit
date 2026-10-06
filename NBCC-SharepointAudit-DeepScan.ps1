@@ -11,8 +11,13 @@
     flagged by the priority report:
 
     - every list/library from the Tier 1 inventory is enumerated (paged),
+      streaming each page straight into Objects (memory stays flat),
     - folders and files become Objects rows (ObjectType 'Folder'/'File')
-      parented under their list via ParentObjectId,
+      parented under their list via ParentObjectId; a parent folder that
+      hasn't streamed in yet is fixed up once paging ends,
+    - per-list progress is tracked in DeepScanProgress, so an interrupted
+      run resumes by skipping finished lists (re-running a partial list is
+      safe: objects upsert, role assignments are replaced per object),
     - role assignments are captured for everything with broken inheritance,
     - findings are re-derived for the site, so the priority report and
       NBCC-SharepointAudit-Viewer.html pick the item-level results up with no schema changes.
@@ -121,47 +126,116 @@ LIMIT 1;
 ###############################################################################################
 #   Paged item enumeration ####################################################################
 ###############################################################################################
-function Get-AllListItems {
+function Initialize-DeepScanProgress {
 
     param(
-        [string]$ListGuid,
-        [string]$SiteRelativeUrl,
-        [string]$ListTitle = ""
+        [string]$DatabasePath
     )
 
-    $Items = [System.Collections.Generic.List[object]]::new()
-    $SeenNext = @{}
-    $Page = 0
-    $Url = "/_api/web/lists(guid'$ListGuid')/items?`$select=Id,FileSystemObjectType,FileLeafRef,FileRef,FileDirRef,HasUniqueRoleAssignments&`$top=2000"
+    # Bookkeeping only: existing tables and the viewer are untouched.
+    Invoke-SqliteQuery `
+        -DataSource $DatabasePath `
+        -Query @"
+CREATE TABLE IF NOT EXISTS DeepScanProgress (
+    SiteId       INTEGER NOT NULL,
+    ListObjectId INTEGER NOT NULL,
+    ListGuid     TEXT NOT NULL,
+    Status       TEXT NOT NULL,
+    ItemsSeen    INTEGER NOT NULL DEFAULT 0,
+    UpdatedAt    TEXT NOT NULL,
+    PRIMARY KEY (SiteId, ListObjectId)
+);
+"@
+}
 
-    while ($Url) {
-        $Page++
-        $Resp = Invoke-ResilientRestMethod -Url $Url
-        if ($Resp.Value) {
-            $Items.AddRange([object[]]$Resp.Value)
-        }
-        Write-Progress `
-            -Id 2 -ParentId 0 -Activity "Paging items: $ListTitle" `
-            -Status "Page $Page, $($Items.Count) items so far" `
-            -PercentComplete -1
+function Test-DeepScanListComplete {
 
-        $Url = $null
-        $Next = $Resp.'__next'
-        if (-not $Next) {
-            $Next = $Resp.'odata.nextLink'
+    param(
+        [int]$SiteId,
+        [int]$ListObjectId,
+        [string]$DatabasePath
+    )
+
+    $row = Invoke-SqliteQuery `
+        -DataSource $DatabasePath `
+        -Query @"
+SELECT Status
+FROM DeepScanProgress
+WHERE SiteId = @SiteId AND ListObjectId = @ListObjectId
+LIMIT 1;
+"@ `
+        -SqlParameters @{ SiteId = $SiteId; ListObjectId = $ListObjectId }
+
+    return ($null -ne $row -and $row.Status -eq 'Complete')
+}
+
+function Set-DeepScanListStatus {
+
+    param(
+        [int]$SiteId,
+        [int]$ListObjectId,
+        [string]$ListGuid,
+        [string]$Status,
+        [int]$ItemsSeen,
+        [string]$DatabasePath
+    )
+
+    Invoke-SqliteQuery `
+        -DataSource $DatabasePath `
+        -Query @"
+INSERT INTO DeepScanProgress (SiteId, ListObjectId, ListGuid, Status, ItemsSeen, UpdatedAt)
+VALUES (@SiteId, @ListObjectId, @ListGuid, @Status, @ItemsSeen, datetime('now'))
+ON CONFLICT(SiteId, ListObjectId)
+DO UPDATE SET Status = excluded.Status,
+              ItemsSeen = excluded.ItemsSeen,
+              UpdatedAt = excluded.UpdatedAt;
+"@ `
+        -SqlParameters @{
+            SiteId       = $SiteId
+            ListObjectId = $ListObjectId
+            ListGuid     = $ListGuid
+            Status       = $Status
+            ItemsSeen    = $ItemsSeen
         }
-        if ($Next) {
-            if ($SeenNext.ContainsKey($Next)) {
-                Write-Warning "Next-page link repeated for list $ListGuid. Stopping paging to avoid a loop."
-                break
-            }
+}
+
+function Get-ListItemPage {
+
+    <#
+    .SYNOPSIS
+        Fetches one page of list items. Returns @{ Items = [object[]]; NextUrl = [string] };
+        NextUrl is empty when paging is done (or stopped early with a warning).
+    #>
+    param(
+        [string]$Url,
+        [string]$ListGuid,
+        [string]$SiteRelativeUrl,
+        [hashtable]$SeenNext
+    )
+
+    $Resp = Invoke-ResilientRestMethod -Url $Url
+    $Items = @()
+    if ($Resp.Value) {
+        $Items = @($Resp.Value)
+    }
+
+    $NextUrl = ""
+    $Next = $Resp.'__next'
+    if (-not $Next) {
+        $Next = $Resp.'odata.nextLink'
+    }
+    if ($Next) {
+        if ($SeenNext.ContainsKey($Next)) {
+            Write-Warning "Next-page link repeated for list $ListGuid. Stopping paging to avoid a loop."
+        }
+        else {
             $SeenNext[$Next] = $true
             $NextUri = $null
             try { $NextUri = [uri]$Next } catch { $NextUri = $null }
             if ($NextUri -and $NextUri.IsAbsoluteUri) {
                 $Abs = $NextUri.AbsolutePath
                 if ($Abs.StartsWith($SiteRelativeUrl, [System.StringComparison]::OrdinalIgnoreCase)) {
-                    $Url = $Abs.Substring($SiteRelativeUrl.Length) + $NextUri.Query
+                    $NextUrl = $Abs.Substring($SiteRelativeUrl.Length) + $NextUri.Query
                 }
                 else {
                     Write-Warning "Unexpected next-page path: $Next. Stopping paging for list $ListGuid."
@@ -169,16 +243,165 @@ function Get-AllListItems {
             }
             elseif ($Next.StartsWith('/')) {
                 # Already server-relative; use as-is.
-                $Url = $Next
+                $NextUrl = $Next
             }
             else {
                 Write-Warning "Unrecognized next-page link format: $Next. Stopping paging for list $ListGuid."
             }
         }
     }
-    Write-Progress -Id 2 -ParentId 0 -Activity "Paging items: $ListTitle" -Completed
 
-    return $Items
+    return @{ Items = $Items; NextUrl = $NextUrl }
+}
+
+function Add-DeepScanItem {
+
+    <#
+    .SYNOPSIS
+        Writes one streamed item to Objects immediately. A parent folder that
+        hasn't streamed in yet is recorded in Pending and fixed up later by
+        Resolve-PendingParents, so the end state matches parents-first order.
+    #>
+    param(
+        [int]$SiteId,
+        $List,
+        $Item,
+        [string]$BaseUri,
+        [hashtable]$FolderMap,
+        [System.Collections.Generic.List[object]]$Pending,
+        [string]$DatabasePath,
+        [ref]$TotalFolders,
+        [ref]$TotalFiles,
+        [ref]$TotalUnique
+    )
+
+    $IsFolder = ($Item.FileSystemObjectType -eq 2)
+    $ObjectType = if ($IsFolder) { 'Folder' } else { 'File' }
+
+    $ParentId = if ($FolderMap.ContainsKey($Item.FileDirRef)) {
+        $FolderMap[$Item.FileDirRef]
+    }
+    else {
+        $List.ObjectId
+    }
+    $HasUnique = if ($Item.HasUniqueRoleAssignments) { 1 } else { 0 }
+    $ObjectDbId = Add-DeepScanObject `
+        -SiteId $SiteId `
+        -ParentObjectId $ParentId `
+        -ObjectType $ObjectType `
+        -ObjectUniqueId "$($List.ObjectUniqueId)|$($Item.Id)" `
+        -Title ([string]$Item.FileLeafRef) `
+        -Url ($BaseUri + $Item.FileRef) `
+        -HasUnique $HasUnique `
+        -DatabasePath $DatabasePath
+
+    if ($IsFolder) {
+        $FolderMap[$Item.FileRef] = $ObjectDbId
+        $TotalFolders.Value++
+    }
+    else {
+        $TotalFiles.Value++
+    }
+
+    if (-not $FolderMap.ContainsKey($Item.FileDirRef)) {
+        # Parent not seen yet (or this sits at the library root): revisit
+        # once more folders have streamed in.
+        $Pending.Add(@{ ObjectDbId = $ObjectDbId; FileDirRef = [string]$Item.FileDirRef })
+    }
+
+    if ($HasUnique -eq 1) {
+        Add-ItemRoleAssignments `
+            -ListGuid $List.ObjectUniqueId `
+            -ItemId $Item.Id `
+            -ObjectDbId $ObjectDbId `
+            -SiteId $SiteId `
+            -DatabasePath $DatabasePath
+        $TotalUnique.Value++
+    }
+}
+
+function Resolve-PendingParents {
+
+    param(
+        [System.Collections.Generic.List[object]]$Pending,
+        [hashtable]$FolderMap,
+        [string]$DatabasePath
+    )
+
+    for ($i = $Pending.Count - 1; $i -ge 0; $i--) {
+        $entry = $Pending[$i]
+        if ($FolderMap.ContainsKey($entry.FileDirRef)) {
+            Invoke-SqliteQuery `
+                -DataSource $DatabasePath `
+                -Query "UPDATE Objects SET ParentObjectId = @ParentId WHERE ObjectId = @ObjectDbId;" `
+                -SqlParameters @{ ParentId = $FolderMap[$entry.FileDirRef]; ObjectDbId = $entry.ObjectDbId }
+            $Pending.RemoveAt($i)
+        }
+    }
+}
+
+function Invoke-DeepScanList {
+
+    <#
+    .SYNOPSIS
+        Streams one list/library page by page into Objects. Memory stays flat
+        (one page plus a FileRef->ObjectId map); progress is tracked per list
+        so an interrupted run resumes by skipping finished lists.
+    #>
+    param(
+        [int]$SiteId,
+        $List,
+        [string]$SiteRel,
+        [string]$BaseUri,
+        [string]$DatabasePath,
+        [ref]$TotalFolders,
+        [ref]$TotalFiles,
+        [ref]$TotalUnique
+    )
+
+    if (Test-DeepScanListComplete -SiteId $SiteId -ListObjectId $List.ObjectId -DatabasePath $DatabasePath) {
+        Write-Host "Skipping $($List.ObjectTitle): already deep-scanned."
+        return
+    }
+
+    Set-DeepScanListStatus -SiteId $SiteId -ListObjectId $List.ObjectId -ListGuid $List.ObjectUniqueId `
+        -Status 'InProgress' -ItemsSeen 0 -DatabasePath $DatabasePath
+
+    $FolderMap = @{}
+    $Pending = [System.Collections.Generic.List[object]]::new()
+    $SeenNext = @{}
+    $PageUrl = "/_api/web/lists(guid'$($List.ObjectUniqueId)')/items?`$select=Id,FileSystemObjectType,FileLeafRef,FileRef,FileDirRef,HasUniqueRoleAssignments&`$top=2000"
+    $Page = 0
+    $ItemsSeen = 0
+
+    while ($PageUrl) {
+        $Page++
+        $Paged = Get-ListItemPage -Url $PageUrl -ListGuid $List.ObjectUniqueId `
+            -SiteRelativeUrl $SiteRel -SeenNext $SeenNext
+        foreach ($Item in $Paged.Items) {
+            Add-DeepScanItem -SiteId $SiteId -List $List -Item $Item -BaseUri $BaseUri `
+                -FolderMap $FolderMap -Pending $Pending -DatabasePath $DatabasePath `
+                -TotalFolders $TotalFolders -TotalFiles $TotalFiles -TotalUnique $TotalUnique
+            $ItemsSeen++
+        }
+        Resolve-PendingParents -Pending $Pending -FolderMap $FolderMap -DatabasePath $DatabasePath
+        Set-DeepScanListStatus -SiteId $SiteId -ListObjectId $List.ObjectId -ListGuid $List.ObjectUniqueId `
+            -Status 'InProgress' -ItemsSeen $ItemsSeen -DatabasePath $DatabasePath
+        Write-Progress `
+            -Id 1 -ParentId 0 -Activity "Deep scan: $($List.ObjectTitle)" `
+            -Status "Page $Page, $ItemsSeen items" `
+            -PercentComplete -1
+        $PageUrl = $Paged.NextUrl
+    }
+
+    # Anything still pending has no folder parent: it sits at the library
+    # root and keeps the list-level fallback parent, matching non-streamed
+    # behavior.
+    $Pending.Clear()
+
+    Set-DeepScanListStatus -SiteId $SiteId -ListObjectId $List.ObjectId -ListGuid $List.ObjectUniqueId `
+        -Status 'Complete' -ItemsSeen $ItemsSeen -DatabasePath $DatabasePath
+    Write-Progress -Id 1 -ParentId 0 -Activity "Deep scan: $($List.ObjectTitle)" -Completed
 }
 ###############################################################################################
 ###############################################################################################
@@ -314,6 +537,8 @@ ORDER BY ObjectTitle;
         return
     }
 
+    Initialize-DeepScanProgress -DatabasePath $DatabasePath
+
     $TotalFolders = 0
     $TotalFiles = 0
     $TotalUnique = 0
@@ -327,99 +552,15 @@ ORDER BY ObjectTitle;
             -Status "List $li of $($Lists.Count): $($List.ObjectTitle)" `
             -PercentComplete (($li / $Lists.Count) * 100)
 
-        $Items = @(Get-AllListItems `
-            -ListGuid $List.ObjectUniqueId `
-            -SiteRelativeUrl $SiteRel `
-            -ListTitle $List.ObjectTitle)
-
-        # Folders first, parents before children, so FileDirRef lookups hit.
-        $Folders = @(
-            $Items |
-                Where-Object { $_.FileSystemObjectType -eq 2 } |
-                Sort-Object { $_.FileRef.Length }
-        )
-        $Files = @(
-            $Items |
-                Where-Object { $_.FileSystemObjectType -ne 2 }
-        )
-
-        $FolderMap = @{}
-        $fi = 0
-        foreach ($Folder in $Folders) {
-            $fi++
-            Write-Progress `
-                -Id 1 -ParentId 0 -Activity "Folders: $($List.ObjectTitle)" `
-                -Status "$fi of $($Folders.Count)" `
-                -PercentComplete (($fi / [math]::Max($Folders.Count, 1)) * 100)
-
-            $ParentId = if ($FolderMap.ContainsKey($Folder.FileDirRef)) {
-                $FolderMap[$Folder.FileDirRef]
-            }
-            else {
-                $List.ObjectId
-            }
-            $HasUnique = if ($Folder.HasUniqueRoleAssignments) { 1 } else { 0 }
-            $ObjectDbId = Add-DeepScanObject `
-                -SiteId $Site.SiteId `
-                -ParentObjectId $ParentId `
-                -ObjectType 'Folder' `
-                -ObjectUniqueId "$($List.ObjectUniqueId)|$($Folder.Id)" `
-                -Title ([string]$Folder.FileLeafRef) `
-                -Url ($BaseUri + $Folder.FileRef) `
-                -HasUnique $HasUnique `
-                -DatabasePath $DatabasePath
-            $FolderMap[$Folder.FileRef] = $ObjectDbId
-            $TotalFolders++
-
-            if ($HasUnique -eq 1) {
-                Add-ItemRoleAssignments `
-                    -ListGuid $List.ObjectUniqueId `
-                    -ItemId $Folder.Id `
-                    -ObjectDbId $ObjectDbId `
-                    -SiteId $Site.SiteId `
-                    -DatabasePath $DatabasePath
-                $TotalUnique++
-            }
-        }
-        Write-Progress -Id 1 -Activity "Folders: $($List.ObjectTitle)" -Completed
-
-        $fi = 0
-        foreach ($File in $Files) {
-            $fi++
-            Write-Progress `
-                -Id 1 -ParentId 0 -Activity "Files: $($List.ObjectTitle)" `
-                -Status "$fi of $($Files.Count)" `
-                -PercentComplete (($fi / [math]::Max($Files.Count, 1)) * 100)
-
-            $ParentId = if ($FolderMap.ContainsKey($File.FileDirRef)) {
-                $FolderMap[$File.FileDirRef]
-            }
-            else {
-                $List.ObjectId
-            }
-            $HasUnique = if ($File.HasUniqueRoleAssignments) { 1 } else { 0 }
-            $ObjectDbId = Add-DeepScanObject `
-                -SiteId $Site.SiteId `
-                -ParentObjectId $ParentId `
-                -ObjectType 'File' `
-                -ObjectUniqueId "$($List.ObjectUniqueId)|$($File.Id)" `
-                -Title ([string]$File.FileLeafRef) `
-                -Url ($BaseUri + $File.FileRef) `
-                -HasUnique $HasUnique `
-                -DatabasePath $DatabasePath
-            $TotalFiles++
-
-            if ($HasUnique -eq 1) {
-                Add-ItemRoleAssignments `
-                    -ListGuid $List.ObjectUniqueId `
-                    -ItemId $File.Id `
-                    -ObjectDbId $ObjectDbId `
-                    -SiteId $Site.SiteId `
-                    -DatabasePath $DatabasePath
-                $TotalUnique++
-            }
-        }
-        Write-Progress -Id 1 -Activity "Files: $($List.ObjectTitle)" -Completed
+        Invoke-DeepScanList `
+            -SiteId $Site.SiteId `
+            -List $List `
+            -SiteRel $SiteRel `
+            -BaseUri $BaseUri `
+            -DatabasePath $DatabasePath `
+            -TotalFolders ([ref]$TotalFolders) `
+            -TotalFiles ([ref]$TotalFiles) `
+            -TotalUnique ([ref]$TotalUnique)
     }
 
     Write-Progress -Id 0 -Activity "Deep scan: $($Site.Title)" -Completed

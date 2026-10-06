@@ -129,8 +129,10 @@ override file values. `-ConfigPath` points at a different file.
 .\NBCC-SharepointAudit-DeepScan.ps1 -PriorityReport -MaxResults 5
 
 # 6. Deep-scan one flagged site: every list/library is enumerated,
-#    folders/files become Objects rows, role assignments are captured
-#    for everything with broken inheritance, findings re-derived
+#    folders/files stream into Objects rows page by page (flat memory),
+#    role assignments are captured for everything with broken
+#    inheritance, findings re-derived. Per-list progress is tracked, so
+#    an interrupted run resumes by skipping finished lists.
 .\NBCC-SharepointAudit-DeepScan.ps1 -SiteUrl "https://tenant.sharepoint.com/sites/Flagged"
 ```
 
