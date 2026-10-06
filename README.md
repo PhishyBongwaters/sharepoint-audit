@@ -10,6 +10,7 @@ scans tenant-wide, stores everything in SQLite, and reports offline.
 - `NBCC-SharepointAudit-DeepScan.ps1` — single-site deep scan + priority report
 - `NBCC-SharepointAudit-Common.ps1` — shared functions dot-sourced by both scripts
 - `NBCC-SharepointAudit-Viewer.html` — offline results viewer: open in a browser, drop the `.db` file in
+- `reports/` — prepacked SQL reports (priority sites, guest access, item-level highs, ...); paste into the viewer's query console
 
 ## How it works
 
