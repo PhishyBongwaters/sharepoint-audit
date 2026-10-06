@@ -125,17 +125,25 @@ function Get-AllListItems {
 
     param(
         [string]$ListGuid,
-        [string]$SiteRelativeUrl
+        [string]$SiteRelativeUrl,
+        [string]$ListTitle = ""
     )
 
-    $Items = @()
+    $Items = [System.Collections.Generic.List[object]]::new()
+    $SeenNext = @{}
+    $Page = 0
     $Url = "/_api/web/lists(guid'$ListGuid')/items?`$select=Id,FileSystemObjectType,FileLeafRef,FileRef,FileDirRef,HasUniqueRoleAssignments&`$top=2000"
 
     while ($Url) {
+        $Page++
         $Resp = Invoke-ResilientRestMethod -Url $Url
         if ($Resp.Value) {
-            $Items += @($Resp.Value)
+            $Items.AddRange([object[]]$Resp.Value)
         }
+        Write-Progress `
+            -Id 2 -ParentId 0 -Activity "Paging items: $ListTitle" `
+            -Status "Page $Page, $($Items.Count) items so far" `
+            -PercentComplete -1
 
         $Url = $null
         $Next = $Resp.'__next'
@@ -143,16 +151,32 @@ function Get-AllListItems {
             $Next = $Resp.'odata.nextLink'
         }
         if ($Next) {
-            $NextUri = [uri]$Next
-            $Abs = $NextUri.AbsolutePath
-            if ($Abs.StartsWith($SiteRelativeUrl, [System.StringComparison]::OrdinalIgnoreCase)) {
-                $Url = $Abs.Substring($SiteRelativeUrl.Length) + $NextUri.Query
+            if ($SeenNext.ContainsKey($Next)) {
+                Write-Warning "Next-page link repeated for list $ListGuid. Stopping paging to avoid a loop."
+                break
+            }
+            $SeenNext[$Next] = $true
+            $NextUri = $null
+            try { $NextUri = [uri]$Next } catch { $NextUri = $null }
+            if ($NextUri -and $NextUri.IsAbsoluteUri) {
+                $Abs = $NextUri.AbsolutePath
+                if ($Abs.StartsWith($SiteRelativeUrl, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $Url = $Abs.Substring($SiteRelativeUrl.Length) + $NextUri.Query
+                }
+                else {
+                    Write-Warning "Unexpected next-page path: $Next. Stopping paging for list $ListGuid."
+                }
+            }
+            elseif ($Next.StartsWith('/')) {
+                # Already server-relative; use as-is.
+                $Url = $Next
             }
             else {
-                Write-Warning "Unexpected next-page path: $Next. Stopping paging for list $ListGuid."
+                Write-Warning "Unrecognized next-page link format: $Next. Stopping paging for list $ListGuid."
             }
         }
     }
+    Write-Progress -Id 2 -ParentId 0 -Activity "Paging items: $ListTitle" -Completed
 
     return $Items
 }
@@ -305,7 +329,8 @@ ORDER BY ObjectTitle;
 
         $Items = @(Get-AllListItems `
             -ListGuid $List.ObjectUniqueId `
-            -SiteRelativeUrl $SiteRel)
+            -SiteRelativeUrl $SiteRel `
+            -ListTitle $List.ObjectTitle)
 
         # Folders first, parents before children, so FileDirRef lookups hit.
         $Folders = @(
