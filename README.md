@@ -123,8 +123,10 @@ override file values. `-ConfigPath` points at a different file.
 # 4. Rebuild all findings from the collected data
 .\NBCC-SharepointAudit.ps1 -Analyze
 
-# 5. Rank sites by findings to pick deep-scan targets (read-only)
+# 5. Rank sites by findings to pick deep-scan targets (read-only).
+#    Add -MaxResults n to see only the top n rows.
 .\NBCC-SharepointAudit-DeepScan.ps1 -PriorityReport
+.\NBCC-SharepointAudit-DeepScan.ps1 -PriorityReport -MaxResults 5
 
 # 6. Deep-scan one flagged site: every list/library is enumerated,
 #    folders/files become Objects rows, role assignments are captured

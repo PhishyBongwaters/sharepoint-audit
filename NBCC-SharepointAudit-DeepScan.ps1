@@ -20,7 +20,8 @@
     Actions:
     -SiteUrl <url>   deep scan one site (must be in Sites from Tier 1 -Refresh)
     -PriorityReport  read-only ranking of sites by finding severity, so
-                     SecOps can pick deep-scan targets (no SharePoint call)
+                     SecOps can pick deep-scan targets (no SharePoint call).
+                     Add -MaxResults <n> to show only the top n rows.
 
     Authentication is Entra app-only via certificate, same as Tier 1: pass
     -Thumbprint, -ClientId and -TenantId at runtime, or put them in
@@ -47,7 +48,10 @@ param(
     [string]$ConfigPath = (Join-Path $PSScriptRoot "audit-config.yaml"),
 
     [Parameter()]
-    [switch]$PriorityReport
+    [switch]$PriorityReport,
+
+    [Parameter()]
+    [int]$MaxResults = 0
 )
 
 ###############################################################################################
@@ -418,13 +422,19 @@ ORDER BY ObjectTitle;
 function Show-PriorityReport {
 
     param(
-        [string]$DatabasePath
+        [string]$DatabasePath,
+        [int]$MaxResults = 0
     )
 
     Write-Host ""
     Write-Host "========================================="
     Write-Host "Priority report: sites ranked by findings"
     Write-Host "========================================="
+
+    $limitClause = ""
+    if ($MaxResults -gt 0) {
+        $limitClause = "LIMIT $MaxResults"
+    }
 
     Invoke-SqliteQuery `
         -DataSource $DatabasePath `
@@ -440,7 +450,8 @@ SELECT
 FROM SecurityFindings sf
 JOIN Sites s ON s.SiteId = sf.SiteId
 GROUP BY s.SiteId, s.Title, s.SiteUrl
-ORDER BY Critical DESC, High DESC, Medium DESC, Low DESC, s.Title;
+ORDER BY Critical DESC, High DESC, Medium DESC, Low DESC, s.Title
+$limitClause;
 "@ | Format-Table
 
     Write-Host "Deep-scan a site: .\NBCC-SharepointAudit-DeepScan.ps1 -SiteUrl <Url> [-DatabasePath <db>]"
@@ -460,7 +471,7 @@ if ($PriorityReport) {
         throw "Database file not found: $DatabasePath. Run NBCC-SharepointAudit.ps1 -Refresh/-ScanAll first."
     }
     Test-DatabaseSchema -DatabasePath $DatabasePath
-    Show-PriorityReport -DatabasePath $DatabasePath
+    Show-PriorityReport -DatabasePath $DatabasePath -MaxResults $MaxResults
 }
 elseif ($DoScan) {
     if (-not (Test-Path $DatabasePath)) {
