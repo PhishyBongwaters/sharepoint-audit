@@ -29,6 +29,19 @@ scans tenant-wide, stores everything in SQLite, and reports offline.
    inheritance state, Full Control assignments, direct user grants, and
    security findings. Read-only: never creates or modifies the database.
 
+### Deep scan (`NBCC-SharepointAudit-DeepScan.ps1`)
+
+`-PriorityReport` ranks every inventoried site by Critical/High/Medium/Low
+finding counts (read-only, no SharePoint calls) so SecOps can pick targets;
+`-MaxResults N` limits it to the top N rows. `-SiteUrl` then deep-scans one
+site: each list/library is paged (2000 items/page, throttle-aware) and every
+page streams straight into `Objects` as `Folder`/`File` rows, so memory stays
+flat no matter how large the library. A parent folder that hasn't streamed in
+yet is fixed up once paging ends; role assignments are captured for items
+with broken inheritance, and findings are re-derived for the site.
+`DeepScanProgress` checkpoints each list, so an interrupted run resumes by
+skipping finished lists.
+
 ## Schema
 
 `Sites` → `Objects` (Site/Library/List tree via `ParentObjectId`,
@@ -38,7 +51,10 @@ scans tenant-wide, stores everything in SQLite, and reports offline.
 unique within a site collection; `Permissions.PrincipalId` references the
 surrogate `Principals.Id`. `SecurityFindings` holds the findings rules
 output (see below). `SharingLinks` holds the per-site sharing-link
-inventory (backing-group title, file GUID, type hint).
+inventory (backing-group title, file GUID, type hint). `DeepScanProgress`
+tracks single-site deep scans per list/library (`InProgress`/`Complete`,
+item counts) so an interrupted deep scan resumes by skipping finished
+lists — bookkeeping only, the viewer and reports ignore it.
 
 ### Severity ratings
 
@@ -86,13 +102,21 @@ stale access (needs Entra sign-in data).
 | `-ClientId`     | Entra app (client) ID (required at runtime)           |
 | `-TenantId`     | Tenant ID (required at runtime)                       |
 | `-DatabasePath` | SQLite database file (default `SharePoint-Audit.db` next to the script) |
-| `-ConfigPath`   | YAML config file (default `./audit-config.yaml`) |
+| `-ConfigPath`   | YAML config file (default `audit-config.yaml` next to the script) |
 | `-Refresh`      | Rebuild the site inventory                            |
 | `-ScanNext`     | Scan the next pending site                             |
 | `-ScanAll`      | Scan all pending sites                                 |
 | `-ScanN`        | Scan the next N pending sites (e.g. `-ScanN 25`)        |
 | `-Analyze`      | (Re)generate security findings for the whole database  |
 | `-Report`       | Print the console reports                              |
+
+Deep-scan-only parameters (`NBCC-SharepointAudit-DeepScan.ps1`):
+
+| Parameter       | Purpose                                              |
+|-----------------|------------------------------------------------------|
+| `-SiteUrl`      | Site to deep-scan (must be in the Tier 1 `Sites` inventory) |
+| `-PriorityReport` | Read-only ranking of sites by finding severity (pick deep-scan targets) |
+| `-MaxResults`   | With `-PriorityReport`, show only the top N rows      |
 
 **Do not commit real values.** Pass `-Thumbprint`, `-ClientId`, and
 `-TenantId` at runtime or via `audit-config.yaml` — never in the repo.
@@ -148,9 +172,14 @@ then scans everything pending).
 ## Viewer
 
 Open `NBCC-SharepointAudit-Viewer.html` in a browser and drop the scanner's `.db` file onto it.
-Everything runs locally (sql.js in the browser, loaded from CDN); the file
-is never uploaded, and the query console only accepts read-only
+Everything runs locally: the sql.js engine is embedded in the single
+HTML file with zero external requests (no CDN). The file is never
+uploaded, and the query console only accepts read-only
 `SELECT`/`WITH`/`EXPLAIN`.
+
+Never open the live database in the viewer mid-scan — it reads raw
+bytes and can catch the file half-written. Use `-Report` (Tier 1) or
+`-PriorityReport` (deep scan) for a consistent snapshot instead.
 
 ## Planned
 
