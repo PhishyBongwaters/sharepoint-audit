@@ -41,7 +41,7 @@ param(
     [string]$TenantId = "",
 
     [Parameter()]
-    [string]$DatabasePath = ".\SharePoint-Audit.db",
+    [string]$DatabasePath = (Join-Path $PSScriptRoot "SharePoint-Audit.db"),
 
     [Parameter()]
     [string]$ConfigPath = (Join-Path $PSScriptRoot "audit-config.yaml"),

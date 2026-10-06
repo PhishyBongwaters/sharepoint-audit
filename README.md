@@ -85,7 +85,7 @@ stale access (needs Entra sign-in data).
 | `-Thumbprint`   | Certificate thumbprint for app-only auth (required at runtime) |
 | `-ClientId`     | Entra app (client) ID (required at runtime)           |
 | `-TenantId`     | Tenant ID (required at runtime)                       |
-| `-DatabasePath` | SQLite database file (default `.\SharePoint-Audit.db`) |
+| `-DatabasePath` | SQLite database file (default `SharePoint-Audit.db` next to the script) |
 | `-ConfigPath`   | YAML config file (default `./audit-config.yaml`) |
 | `-Refresh`      | Rebuild the site inventory                            |
 | `-ScanNext`     | Scan the next pending site                             |
@@ -137,7 +137,7 @@ schema, auth, principals, role assignments, findings) — the deep scan
 reuses Tier 1's exact logic, so the viewer and reports pick up
 item-level rows with no schema changes.
 
-All commands default to `.\SharePoint-Audit.db`; override with `-DatabasePath`.
+All commands default to `SharePoint-Audit.db` next to the script; override with `-DatabasePath` (a relative path resolves against your working directory).
 Switches can be combined (e.g. `-Refresh -ScanAll` refreshes the inventory,
 then scans everything pending).
 
