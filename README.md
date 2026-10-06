@@ -120,7 +120,20 @@ override file values. `-ConfigPath` points at a different file.
 
 # 4. Rebuild all findings from the collected data
 .\get-sharepointSites.ps1 -Analyze
+
+# 5. Rank sites by findings to pick deep-scan targets (read-only)
+.\get-sharepointDeepScan.ps1 -PriorityReport
+
+# 6. Deep-scan one flagged site: every list/library is enumerated,
+#    folders/files become Objects rows, role assignments are captured
+#    for everything with broken inheritance, findings re-derived
+.\get-sharepointDeepScan.ps1 -SiteUrl "https://tenant.sharepoint.com/sites/Flagged"
 ```
+
+Both scripts share `SharePointAudit.Common.ps1` (throttle-aware REST,
+schema, auth, principals, role assignments, findings) — the deep scan
+reuses Tier 1's exact logic, so the viewer and reports pick up
+item-level rows with no schema changes.
 
 All commands default to `.\SharePoint-Audit.db`; override with `-DatabasePath`.
 Switches can be combined (e.g. `-Refresh -ScanAll` refreshes the inventory,
@@ -135,8 +148,6 @@ is never uploaded, and the query console only accepts read-only
 
 ## Planned
 
-- Priority report: ranked site-level findings so SecOps can pick deep-scan targets
-- Single-site deep scan (second script): on-demand list/library/item-level crawl, scoped to broken-inheritance subtrees
 - Authoritative per-link scope and expiry (`GetSharingInformation`) for
   link-bearing files found by the backing-group inventory
 - Stale access detection (needs Entra sign-in data)
