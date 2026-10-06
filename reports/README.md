@@ -10,13 +10,19 @@ triage question (see its header comment).
 accepts read-only `SELECT`/`WITH`/`EXPLAIN` — every report here is a plain
 `SELECT`.
 
-**PowerShell (PSSQLite):**
+**PowerShell (PSSQLite)** — the included helper is the template block.
+Run a prepacked report by number or name fragment, or paste SQL into
+`-Query`:
 
 ```powershell
-Invoke-SqliteQuery -DataSource SharePoint-Audit.db `
-    -Query (Get-Content reports/01-priority-sites.sql -Raw) |
-    Format-Table
+.\reports\Invoke-Report.ps1 -Name 01-priority-sites
+.\reports\Invoke-Report.ps1 -Name guest-access -GridView
+.\reports\Invoke-Report.ps1 -Query "SELECT COUNT(*) AS Sites FROM Sites;"
 ```
+
+With no arguments it lists the available reports. `-GridView` opens the
+results in an interactive filterable grid instead of a console table.
+`-DatabasePath` defaults to `SharePoint-Audit.db` next to the scripts.
 
 ## Scoping to one site
 
