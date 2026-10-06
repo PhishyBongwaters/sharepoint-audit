@@ -135,10 +135,11 @@ is never uploaded, and the query console only accepts read-only
 
 ## Planned
 
+- Priority report: ranked site-level findings so SecOps can pick deep-scan targets
+- Single-site deep scan (second script): on-demand list/library/item-level crawl, scoped to broken-inheritance subtrees
 - Authoritative per-link scope and expiry (`GetSharingInformation`) for
   link-bearing files found by the backing-group inventory
 - Stale access detection (needs Entra sign-in data)
-- Item-level crawl, scoped to broken-inheritance subtrees and sampling
 - Delta/incremental scans, scheduled runs, alerting
 
 ## Security notes
