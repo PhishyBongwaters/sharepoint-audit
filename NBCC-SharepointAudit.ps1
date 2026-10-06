@@ -90,7 +90,7 @@ Remove-Variable -Name __Config, __ParamMap, __entry -ErrorAction SilentlyContinu
 # Shared functions (throttle-aware REST, schema, auth, principals, role
 # assignments, findings). Dot-sourced so the deep-scan script reuses the
 # exact same logic; no top-level code runs on load.
-. "$PSScriptRoot\SharePointAudit.Common.ps1"
+. "$PSScriptRoot\NBCC-SharepointAudit-Common.ps1"
 
 function Reset-IncompleteScans {
 

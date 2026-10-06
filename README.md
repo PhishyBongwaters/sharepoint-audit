@@ -6,8 +6,10 @@ scans tenant-wide, stores everything in SQLite, and reports offline.
 
 ## Contents
 
-- `get-sharepointSites.ps1` — the scanner (PowerShell 7+, PnP.PowerShell, PSSQLite)
-- `view.html` — offline results viewer: open in a browser, drop the `.db` file in
+- `NBCC-SharepointAudit.ps1` — the Tier 1 scanner (PowerShell 7+, PnP.PowerShell, PSSQLite)
+- `NBCC-SharepointAudit-DeepScan.ps1` — single-site deep scan + priority report
+- `NBCC-SharepointAudit-Common.ps1` — shared functions dot-sourced by both scripts
+- `NBCC-SharepointAudit-Viewer.html` — offline results viewer: open in a browser, drop the `.db` file in
 
 ## How it works
 
@@ -107,30 +109,30 @@ override file values. `-ConfigPath` points at a different file.
 # -Thumbprint/-ClientId/-TenantId still work and override it).
 
 # 1. Build the site inventory
-.\get-sharepointSites.ps1 -Refresh
+.\NBCC-SharepointAudit.ps1 -Refresh
 
 # 2. Scan in bounded batches; safe to re-run, resumes where it left off
-.\get-sharepointSites.ps1 -ScanN 50
+.\NBCC-SharepointAudit.ps1 -ScanN 50
 
 # Or scan everything pending in one go
-.\get-sharepointSites.ps1 -ScanAll
+.\NBCC-SharepointAudit.ps1 -ScanAll
 
 # 3. Console reports (read-only)
-.\get-sharepointSites.ps1 -Report
+.\NBCC-SharepointAudit.ps1 -Report
 
 # 4. Rebuild all findings from the collected data
-.\get-sharepointSites.ps1 -Analyze
+.\NBCC-SharepointAudit.ps1 -Analyze
 
 # 5. Rank sites by findings to pick deep-scan targets (read-only)
-.\get-sharepointDeepScan.ps1 -PriorityReport
+.\NBCC-SharepointAudit-DeepScan.ps1 -PriorityReport
 
 # 6. Deep-scan one flagged site: every list/library is enumerated,
 #    folders/files become Objects rows, role assignments are captured
 #    for everything with broken inheritance, findings re-derived
-.\get-sharepointDeepScan.ps1 -SiteUrl "https://tenant.sharepoint.com/sites/Flagged"
+.\NBCC-SharepointAudit-DeepScan.ps1 -SiteUrl "https://tenant.sharepoint.com/sites/Flagged"
 ```
 
-Both scripts share `SharePointAudit.Common.ps1` (throttle-aware REST,
+Both scripts share `NBCC-SharepointAudit-Common.ps1` (throttle-aware REST,
 schema, auth, principals, role assignments, findings) — the deep scan
 reuses Tier 1's exact logic, so the viewer and reports pick up
 item-level rows with no schema changes.
@@ -141,7 +143,7 @@ then scans everything pending).
 
 ## Viewer
 
-Open `view.html` in a browser and drop the scanner's `.db` file onto it.
+Open `NBCC-SharepointAudit-Viewer.html` in a browser and drop the scanner's `.db` file onto it.
 Everything runs locally (sql.js in the browser, loaded from CDN); the file
 is never uploaded, and the query console only accepts read-only
 `SELECT`/`WITH`/`EXPLAIN`.

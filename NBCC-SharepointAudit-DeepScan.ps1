@@ -6,7 +6,7 @@
     Single-site deep scan: item-level permission crawl for one SharePoint site.
 
 .DESCRIPTION
-    Second script in the audit pair. get-sharepointSites.ps1 (Tier 1) maps
+    Second script in the audit pair. NBCC-SharepointAudit.ps1 (Tier 1) maps
     site-level permissions across the tenant; this script deep-dives one site
     flagged by the priority report:
 
@@ -15,7 +15,7 @@
       parented under their list via ParentObjectId,
     - role assignments are captured for everything with broken inheritance,
     - findings are re-derived for the site, so the priority report and
-      view.html pick the item-level results up with no schema changes.
+      NBCC-SharepointAudit-Viewer.html pick the item-level results up with no schema changes.
 
     Actions:
     -SiteUrl <url>   deep scan one site (must be in Sites from Tier 1 -Refresh)
@@ -81,7 +81,7 @@ Remove-Variable -Name __Config, __ParamMap, __entry -ErrorAction SilentlyContinu
 
 # Shared functions (throttle-aware REST, schema, auth, principals, role
 # assignments, findings) — the exact same logic Tier 1 uses.
-. "$PSScriptRoot\SharePointAudit.Common.ps1"
+. "$PSScriptRoot\NBCC-SharepointAudit-Common.ps1"
 
 ###############################################################################################
 #   Site resolution ###########################################################################
@@ -106,7 +106,7 @@ LIMIT 1;
         -SqlParameters @{ U1 = $Norm; U2 = "$Norm/" }
 
     if (-not $Site) {
-        throw "Site not found in inventory: $SiteUrl. Run get-sharepointSites.ps1 -Refresh first."
+        throw "Site not found in inventory: $SiteUrl. Run NBCC-SharepointAudit.ps1 -Refresh first."
     }
 
     return $Site
@@ -443,7 +443,7 @@ GROUP BY s.SiteId, s.Title, s.SiteUrl
 ORDER BY Critical DESC, High DESC, Medium DESC, Low DESC, s.Title;
 "@ | Format-Table
 
-    Write-Host "Deep-scan a site: .\get-sharepointDeepScan.ps1 -SiteUrl <Url> [-DatabasePath <db>]"
+    Write-Host "Deep-scan a site: .\NBCC-SharepointAudit-DeepScan.ps1 -SiteUrl <Url> [-DatabasePath <db>]"
     Write-Host ""
 }
 ###############################################################################################
@@ -457,14 +457,14 @@ $DoScan = (-not $PriorityReport) -and (-not [string]::IsNullOrWhiteSpace($SiteUr
 if ($PriorityReport) {
     # -PriorityReport is read-only: never creates or modifies the database.
     if (-not (Test-Path $DatabasePath)) {
-        throw "Database file not found: $DatabasePath. Run get-sharepointSites.ps1 -Refresh/-ScanAll first."
+        throw "Database file not found: $DatabasePath. Run NBCC-SharepointAudit.ps1 -Refresh/-ScanAll first."
     }
     Test-DatabaseSchema -DatabasePath $DatabasePath
     Show-PriorityReport -DatabasePath $DatabasePath
 }
 elseif ($DoScan) {
     if (-not (Test-Path $DatabasePath)) {
-        throw "Database file not found: $DatabasePath. Run get-sharepointSites.ps1 -Refresh/-ScanAll first."
+        throw "Database file not found: $DatabasePath. Run NBCC-SharepointAudit.ps1 -Refresh/-ScanAll first."
     }
     Test-DatabaseSchema -DatabasePath $DatabasePath
     $Site = Resolve-DeepScanSite -SiteUrl $SiteUrl -DatabasePath $DatabasePath

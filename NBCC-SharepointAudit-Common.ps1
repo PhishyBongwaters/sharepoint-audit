@@ -1,6 +1,6 @@
-# SharePointAudit.Common.ps1 — shared functions for the audit scripts.
+# NBCC-SharepointAudit-Common.ps1 — shared functions for the audit scripts.
 # Dot-source only: this file defines functions and performs no actions.
-# Both get-sharepointSites.ps1 (Tier 1) and get-sharepointDeepScan.ps1
+# Both NBCC-SharepointAudit.ps1 (Tier 1) and NBCC-SharepointAudit-DeepScan.ps1
 # (single-site deep scan) dot-source it.
 
 
