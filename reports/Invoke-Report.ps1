@@ -16,6 +16,9 @@
         .\Invoke-Report.ps1 -Name guest-access
         .\Invoke-Report.ps1 -Query "SELECT COUNT(*) AS Sites FROM Sites;"
 
+    Reads databasepath from audit-config.yaml (same file as the main
+    scripts) when -DatabasePath isn't passed explicitly.
+
 .EXAMPLE
     .\Invoke-Report.ps1 -Name 03-item-level-highs -GridView
 #>
@@ -30,8 +33,28 @@ param(
     [string]$DatabasePath = (Join-Path (Split-Path $PSScriptRoot -Parent) "SharePoint-Audit.db"),
 
     [Parameter()]
+    [string]$ConfigPath = (Join-Path (Split-Path $PSScriptRoot -Parent) "audit-config.yaml"),
+
+    [Parameter()]
     [switch]$GridView
 )
+
+# Same flat "key: value" config file as the main scripts. Explicit parameters win.
+$__Config = @{}
+if (Test-Path $ConfigPath) {
+    Get-Content $ConfigPath | ForEach-Object {
+        if ($_ -match '^\s*([^:#\s][^:]*?)\s*:\s*(.+?)\s*$') {
+            $__Config[$matches[1].Trim().ToLower()] = $matches[2].Trim().Trim('"').Trim("'")
+        }
+    }
+}
+foreach ($__key in @('databasepath', 'database_path')) {
+    if ($__Config.ContainsKey($__key) -and -not $PSBoundParameters.ContainsKey('DatabasePath')) {
+        $DatabasePath = $__Config[$__key]
+        break
+    }
+}
+Remove-Variable -Name __Config, __key -ErrorAction SilentlyContinue
 
 if ([string]::IsNullOrWhiteSpace($Name) -and [string]::IsNullOrWhiteSpace($Query)) {
     Write-Host "Usage:"

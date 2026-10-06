@@ -22,7 +22,9 @@ Run a prepacked report by number or name fragment, or paste SQL into
 
 With no arguments it lists the available reports. `-GridView` opens the
 results in an interactive filterable grid instead of a console table.
-`-DatabasePath` defaults to `SharePoint-Audit.db` next to the scripts.
+`-DatabasePath` defaults to `SharePoint-Audit.db` next to the scripts, or
+to `databasepath` from `audit-config.yaml` (the same config file the main
+scripts use) when present.
 
 ## Scoping to one site
 
